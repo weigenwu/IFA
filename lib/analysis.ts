@@ -54,6 +54,7 @@ export interface ColocResult {
 
 export interface LineProfile {
   distance: number[];
+  validCount: number[];
   rawA: number[];
   rawB: number[];
   correctedA: number[];
@@ -138,7 +139,7 @@ export function intensityStats(channel: ChannelData, width: number, height: numb
       sumSq += value * value;
       if (value < min) min = value;
       if (value > max) max = value;
-      if (value >= channel.maxValue) saturated++;
+      if (channel.integer && value >= channel.maxValue) saturated++;
     }
   }
   const mean = sum / b.pixels;
@@ -155,7 +156,7 @@ export function intensityStats(channel: ChannelData, width: number, height: numb
     backgroundSd,
     correctedMean: mean - backgroundMean,
     ctcf: sum - b.pixels * backgroundMean,
-    saturationPct: saturated / b.pixels * 100,
+    saturationPct: channel.integer ? saturated / b.pixels * 100 : Number.NaN,
   };
 }
 
@@ -315,8 +316,8 @@ export function calculateColocalization(
       if (bv > 0) sumAPresentB += apos;
       if (av > 0) sumBPresentA += bpos;
       if (av === 0 && bv === 0) zeroZero++;
-      if (rawA >= a.maxValue) saturatedA++;
-      if (rawB >= b.maxValue) saturatedB++;
+      if (a.integer && rawA >= a.maxValue) saturatedA++;
+      if (b.integer && rawB >= b.maxValue) saturatedB++;
       const product = (av - meanA) * (bv - meanB);
       if (product !== 0) { nonzeroProducts++; if (product > 0) positiveProducts++; }
     }
@@ -325,8 +326,8 @@ export function calculateColocalization(
   if (!bounds.pixels) warnings.push('ROI 为空，无法计算。');
   if (!Number.isFinite(thresholdA) || !Number.isFinite(thresholdB)) warnings.push('自动阈值拟合失败；请改用 Otsu 或手动阈值。');
   if (a.id === b.id) warnings.push('通道 A 与通道 B 相同，结果没有跨通道意义。');
-  const satA = bounds.pixels ? saturatedA / bounds.pixels * 100 : 0;
-  const satB = bounds.pixels ? saturatedB / bounds.pixels * 100 : 0;
+  const satA = a.integer && bounds.pixels ? saturatedA / bounds.pixels * 100 : Number.NaN;
+  const satB = b.integer && bounds.pixels ? saturatedB / bounds.pixels * 100 : Number.NaN;
   if (satA > 1 || satB > 1) warnings.push('ROI 内饱和像素超过 1%，共定位结果可能失真。');
   if (thresholdMethod === 'costes' && Number.isFinite(regressionIntercept) && Math.abs(regressionIntercept / (meanB || 1)) > 0.01) warnings.push('Costes 回归零偏置较明显，请检查背景与探测器 offset。');
   if (thresholdMethod === 'costes' && (thresholdA > meanA || thresholdB > meanB)) warnings.push('Costes 阈值高于通道均值，阳性像素可能很少。');
@@ -350,6 +351,7 @@ export function calculateColocalization(
 }
 
 function bilinear(data: NumericArray, width: number, height: number, x: number, y: number): number {
+  if (x < 0 || y < 0 || x > width - 1 || y > height - 1) return Number.NaN;
   const x0 = clamp(Math.floor(x), 0, width - 1), y0 = clamp(Math.floor(y), 0, height - 1);
   const x1 = Math.min(width - 1, x0 + 1), y1 = Math.min(height - 1, y0 + 1);
   const fx = clamp(x - x0, 0, 1), fy = clamp(y - y0, 0, 1);
@@ -378,28 +380,28 @@ export function gaussianSmooth(values: number[], sigma: number): number[] {
 export function lineProfile(a: ChannelData, b: ChannelData, width: number, height: number, line: Line, lineWidth: number, sigma: number, backgroundA = 0, backgroundB = 0): LineProfile {
   const dx = line.x2 - line.x1, dy = line.y2 - line.y1;
   const length = Math.hypot(dx, dy);
-  if (length < 1) return { distance: [], rawA: [], rawB: [], correctedA: [], correctedB: [], smoothA: [], smoothB: [], sdA: [], sdB: [] };
+  if (length < 1) return { distance: [], validCount: [], rawA: [], rawB: [], correctedA: [], correctedB: [], smoothA: [], smoothB: [], sdA: [], sdB: [] };
   const count = Math.max(2, Math.ceil(length) + 1);
   const samplesAcross = Math.max(1, Math.round(lineWidth));
   const px = -dy / length, py = dx / length;
-  const distance: number[] = [], rawA: number[] = [], rawB: number[] = [], sdA: number[] = [], sdB: number[] = [];
+  const distance: number[] = [], validCount: number[] = [], rawA: number[] = [], rawB: number[] = [], sdA: number[] = [], sdB: number[] = [];
   for (let i = 0; i < count; i++) {
     const t = i / (count - 1), cx = line.x1 + dx * t, cy = line.y1 + dy * t;
-    let sumA = 0, sumB = 0, sumSqA = 0, sumSqB = 0;
+    let sumA = 0, sumB = 0, sumSqA = 0, sumSqB = 0, valid = 0;
     for (let j = 0; j < samplesAcross; j++) {
       const offset = j - (samplesAcross - 1) / 2;
       const av = bilinear(a.data, width, height, cx + px * offset, cy + py * offset);
       const bv = bilinear(b.data, width, height, cx + px * offset, cy + py * offset);
-      sumA += av; sumB += bv; sumSqA += av * av; sumSqB += bv * bv;
+      if (Number.isFinite(av) && Number.isFinite(bv)) { sumA += av; sumB += bv; sumSqA += av * av; sumSqB += bv * bv; valid++; }
     }
-    const meanA = sumA / samplesAcross, meanB = sumB / samplesAcross;
-    distance.push(length * t); rawA.push(meanA); rawB.push(meanB);
-    sdA.push(samplesAcross > 1 ? Math.sqrt(Math.max(0, (sumSqA - sumA * sumA / samplesAcross) / (samplesAcross - 1))) : 0);
-    sdB.push(samplesAcross > 1 ? Math.sqrt(Math.max(0, (sumSqB - sumB * sumB / samplesAcross) / (samplesAcross - 1))) : 0);
+    const meanA = valid ? sumA / valid : Number.NaN, meanB = valid ? sumB / valid : Number.NaN;
+    distance.push(length * t); validCount.push(valid); rawA.push(meanA); rawB.push(meanB);
+    sdA.push(valid > 1 ? Math.sqrt(Math.max(0, (sumSqA - sumA * sumA / valid) / (valid - 1))) : 0);
+    sdB.push(valid > 1 ? Math.sqrt(Math.max(0, (sumSqB - sumB * sumB / valid) / (valid - 1))) : 0);
   }
   const correctedA = rawA.map(value => value - backgroundA);
   const correctedB = rawB.map(value => value - backgroundB);
-  return { distance, rawA, rawB, correctedA, correctedB, smoothA: gaussianSmooth(correctedA, sigma), smoothB: gaussianSmooth(correctedB, sigma), sdA, sdB };
+  return { distance, validCount, rawA, rawB, correctedA, correctedB, smoothA: gaussianSmooth(correctedA, sigma), smoothB: gaussianSmooth(correctedB, sigma), sdA, sdB };
 }
 
 export function scatterSample(a: ChannelData, b: ChannelData, width: number, height: number, roi: Rect | null | undefined, backgroundA = 0, backgroundB = 0, limit = 20000) {

@@ -26,7 +26,7 @@ const channelInfo = (data: NumericArray) => {
 const makeChannel = (id: string, label: string, data: NumericArray): ChannelData => ({ id, label, data, ...channelInfo(data) });
 
 async function sha256(buffer: ArrayBuffer) {
-  const digest = await crypto.subtle.digest('SHA-256', buffer.slice(0));
+  const digest = await crypto.subtle.digest('SHA-256', buffer);
   return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
@@ -74,9 +74,10 @@ async function loadTiff(file: File, buffer: ArrayBuffer): Promise<LoadedImage> {
   if (sampleCount > 1) {
     const count = Math.min(3, sampleCount);
     const rasters = await first.readRasters({ samples: Array.from({ length: count }, (_, index) => index) }) as unknown as NumericArray[];
-    const labels = sampleCount >= 3 ? ['红色 / R', '绿色 / G', '蓝色 / B'] : ['样本 1', '样本 2', '样本 3'];
+    const labels = ['样本 1', '样本 2', '样本 3'];
     for (let i = 0; i < count; i++) channels.push(makeChannel(`sample-${i + 1}`, labels[i], rasters[i]));
-    if (sampleCount > 3) warnings.push(`文件含 ${sampleCount} 个样本，本版载入前 3 个。`);
+    warnings.push(`文件含 ${sampleCount} 个样本；请确认样本与荧光通道的对应关系。`);
+    if (sampleCount > 3) warnings.push(`本版仅载入前 3 个样本。`);
   } else {
     const count = Math.min(3, pageCount);
     for (let i = 0; i < count; i++) {

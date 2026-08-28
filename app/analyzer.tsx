@@ -76,7 +76,7 @@ export default function Analyzer() {
   const [backgroundMethod, setBackgroundMethod] = useState<BackgroundMethod>('none');
   const [lineWidth, setLineWidth] = useState(5);
   const [sigma, setSigma] = useState(0);
-  const [pixelSize, setPixelSize] = useState(1);
+  const [pixelSize, setPixelSize] = useState(0);
   const [analysisState, setAnalysis] = useState<AnalysisState | null>(null);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -293,7 +293,7 @@ export default function Analyzer() {
       ['section', 'channel', 'metric', 'value', 'unit'],
       ['metadata', '', 'file_name', image.fileName, ''], ['metadata', '', 'sha256', image.hash, ''],
       ['metadata', '', 'width', image.width, 'px'], ['metadata', '', 'height', image.height, 'px'],
-      ['metadata', '', 'pixel_size', pixelSize, 'µm/px'], ['metadata', '', 'threshold_method', thresholdLabels[thresholdMethod], ''],
+      ['metadata', '', 'pixel_size', pixelSize || '', pixelSize ? 'µm/px' : 'not_set'], ['metadata', '', 'threshold_method', thresholdLabels[thresholdMethod], ''],
       ['metadata', '', 'background_method', backgroundLabels[backgroundMethod], ''],
     ];
     const colocEntries: [string, number, string][] = [
@@ -303,7 +303,10 @@ export default function Analyzer() {
       ['threshold_A', analysis.coloc.thresholdA, 'A.U.'], ['threshold_B', analysis.coloc.thresholdB, 'A.U.'],
     ];
     colocEntries.forEach(([metric, value, unit]) => rows.push(['colocalization', '', metric, value, unit]));
-    const addIntensity = (label: string, stats: IntensityStats) => Object.entries(stats).forEach(([metric, value]) => rows.push(['intensity', label, metric, value, metric.includes('Pct') ? '%' : metric === 'pixels' ? 'px' : 'A.U.']));
+    const addIntensity = (label: string, stats: IntensityStats) => {
+      if (pixelSize) rows.push(['intensity', label, 'area', stats.pixels * pixelSize * pixelSize, 'µm²']);
+      Object.entries(stats).forEach(([metric, value]) => rows.push(['intensity', label, metric, value, metric.includes('Pct') ? '%' : metric === 'pixels' ? 'px' : 'A.U.']));
+    };
     addIntensity(channelA.label, analysis.intensityA); addIntensity(channelB.label, analysis.intensityB);
     saveText(`${image.fileName.replace(/\.[^.]+$/, '')}_metrics.csv`, rows.map(row => row.map(csvCell).join(',')).join('\n'), 'text/csv;charset=utf-8');
   };
@@ -311,8 +314,8 @@ export default function Analyzer() {
   const exportProfile = () => {
     if (!analysis?.profile || !image) return;
     const profile = analysis.profile;
-    const header = ['distance_px', 'distance_um', 'raw_A', 'raw_B', 'background_corrected_A', 'background_corrected_B', 'smoothed_A', 'smoothed_B', 'sd_A', 'sd_B'];
-    const rows = profile.distance.map((distance, index) => [distance, distance * pixelSize, profile.rawA[index], profile.rawB[index], profile.correctedA[index], profile.correctedB[index], profile.smoothA[index], profile.smoothB[index], profile.sdA[index], profile.sdB[index]]);
+    const header = ['distance_px', 'distance_um', 'valid_count', 'raw_A', 'raw_B', 'background_corrected_A', 'background_corrected_B', 'smoothed_A', 'smoothed_B', 'sd_A', 'sd_B'];
+    const rows = profile.distance.map((distance, index) => [distance, pixelSize ? distance * pixelSize : '', profile.validCount[index], profile.rawA[index], profile.rawB[index], profile.correctedA[index], profile.correctedB[index], profile.smoothA[index], profile.smoothB[index], profile.sdA[index], profile.sdB[index]]);
     saveText(`${image.fileName.replace(/\.[^.]+$/, '')}_line_profile.csv`, [header, ...rows].map(row => row.map(csvCell).join(',')).join('\n'), 'text/csv;charset=utf-8');
   };
 
@@ -322,7 +325,7 @@ export default function Analyzer() {
       schema: 'FluoroScope analysis 1.0', createdAt: analysis.createdAt,
       source: { fileName: image.fileName, sha256: image.hash, format: image.format, width: image.width, height: image.height, pageCount: image.pageCount },
       channels: { a: { id: channelA.id, label: channelA.label, bitDepth: channelA.bitDepth }, b: { id: channelB.id, label: channelB.label, bitDepth: channelB.bitDepth } },
-      parameters: { roi, backgroundRoi, backgroundMethod, background, thresholdMethod, manualThresholdPercent: { a: manualA, b: manualB }, scanLine, lineWidthPx: lineWidth, gaussianSigmaPx: sigma, pixelSizeUm: pixelSize, comparison: 'strict >', costesSignificanceTest: false },
+      parameters: { roi, backgroundRoi, backgroundMethod, background, thresholdMethod, manualThresholdPercent: { a: manualA, b: manualB }, scanLine, lineWidthPx: lineWidth, gaussianSigmaPx: sigma, pixelSizeUm: pixelSize || null, comparison: 'strict >', costesSignificanceTest: false },
       results: analysis,
       warnings: [...image.warnings, ...analysis.coloc.warnings, '共定位不等于分子相互作用。'],
     };
@@ -359,7 +362,7 @@ export default function Analyzer() {
 
           <div className="field-group"><p>阈值</p><label className="wide-field">方法<select value={thresholdMethod} onChange={event => setThresholdMethod(event.target.value as ThresholdMethod)}><option value="costes">Costes 自动</option><option value="otsu">Otsu 自动</option><option value="manual">手动阈值</option><option value="none">零阈值</option></select></label>{thresholdMethod === 'manual' && <div className="range-pair"><label>A {manualA}%<input type="range" min="0" max="100" value={manualA} onChange={event => setManualA(Number(event.target.value))} /></label><label>B {manualB}%<input type="range" min="0" max="100" value={manualB} onChange={event => setManualB(Number(event.target.value))} /></label></div>}</div>
 
-          <div className="field-group"><p>背景与标尺</p><label className="wide-field">背景<select value={backgroundMethod} onChange={event => setBackgroundMethod(event.target.value as BackgroundMethod)}><option value="none">不校正</option><option value="roi">背景 ROI 均值</option><option value="percentile">ROI 第 5 百分位</option></select></label><label className="number-field">像素尺寸<input type="number" min="0.000001" step="0.01" value={pixelSize} onChange={event => setPixelSize(Math.max(0.000001, Number(event.target.value) || 1))} /><span>µm/px</span></label></div>
+          <div className="field-group"><p>背景与标尺</p><label className="wide-field">背景<select value={backgroundMethod} onChange={event => setBackgroundMethod(event.target.value as BackgroundMethod)}><option value="none">不校正</option><option value="roi">背景 ROI 均值</option><option value="percentile">ROI 第 5 百分位</option></select></label><label className="number-field">像素尺寸<input type="number" min="0" step="0.01" value={pixelSize} onChange={event => setPixelSize(Math.max(0, Number(event.target.value) || 0))} /><span>µm/px</span></label></div>
         </aside>
 
         <div className="image-stage">
@@ -369,7 +372,7 @@ export default function Analyzer() {
             {image && <div className="canvas-stack" style={{ aspectRatio: `${image.width}/${image.height}` }}><canvas ref={imageCanvas} /><canvas ref={overlayCanvas} aria-label={`在图像上绘制${tool === 'roi' ? '分析 ROI' : tool === 'background' ? '背景 ROI' : '线扫描'}`} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={() => { setDragStart(null); setDraft(null); }} /></div>}
           </div>
           <div className="stage-tools" aria-label="绘图工具"><button className={tool === 'roi' ? 'selected' : ''} onClick={() => setTool('roi')}><b>□</b>分析 ROI</button><button className={tool === 'background' ? 'selected' : ''} onClick={() => setTool('background')}><b>▧</b>背景 ROI</button><button className={tool === 'line' ? 'selected' : ''} onClick={() => setTool('line')}><b>╱</b>线扫描</button><span className="tool-spacer" /><button onClick={() => setRoi(null)}>全图</button><button onClick={() => { setRoi(null); setBackgroundRoi(null); setScanLine(null); }}>清除标注</button></div>
-          <div className="stage-foot"><span>ROI：{roiText}</span><span>线长：{scanLine ? `${format(lineLength, 1)} px / ${format(lineLength * pixelSize, 2)} µm` : '—'}</span><span>BG A/B：{format(background.a, 2)} / {format(background.b, 2)}</span></div>
+          <div className="stage-foot"><span>ROI：{roiText}</span><span>线长：{scanLine ? `${format(lineLength, 1)} px${pixelSize ? ` / ${format(lineLength * pixelSize, 2)} µm` : ''}` : '—'}</span><span>BG A/B：{format(background.a, 2)} / {format(background.b, 2)}</span></div>
         </div>
 
         <aside className="results-panel">
@@ -392,7 +395,7 @@ export default function Analyzer() {
 
         <article className="result-card intensity-card"><header><div><span>ROI 荧光强度</span><small>RawIntDen、背景校正与 CTCF 均基于原始像素值</small></div><b>{roi ? `ROI ${roiText}` : '全图'}</b></header><div className="table-wrap"><table><thead><tr><th>通道</th><th>像素数</th><th>Mean</th><th>Median</th><th>SD</th><th>Min–Max</th><th>RawIntDen</th><th>Background</th><th>Corrected Mean</th><th>CTCF</th><th>饱和</th></tr></thead><tbody>{[channelA, channelB].map((channel, index) => { const stats = index ? analysis?.intensityB : analysis?.intensityA; return <tr key={`${channel?.id}-${index}`}><td><i className={`dot ${index ? 'magenta' : 'cyan'}`} />{channel?.label ?? `通道 ${index ? 'B' : 'A'}`}</td><td>{stats ? stats.pixels.toLocaleString() : '—'}</td><td>{stats ? format(stats.mean, 2) : '—'}</td><td>{stats ? format(stats.median, 2) : '—'}</td><td>{stats ? format(stats.sd, 2) : '—'}</td><td>{stats ? `${format(stats.min, 1)}–${format(stats.max, 1)}` : '—'}</td><td>{stats ? format(stats.sum, 1) : '—'}</td><td>{stats ? format(stats.backgroundMean, 2) : '—'}</td><td>{stats ? format(stats.correctedMean, 2) : '—'}</td><td>{stats ? format(stats.ctcf, 1) : '—'}</td><td>{stats ? `${format(stats.saturationPct, 2)}%` : '—'}</td></tr>; })}</tbody></table></div></article>
 
-        <article className="result-card profile-card"><header><div><span>荧光线扫描</span><small>沿线每 1 px 双线性采样；线宽内取 mean ± sample SD</small></div><div className="profile-controls"><label>线宽<input type="number" min="1" max="101" value={lineWidth} onChange={event => setLineWidth(Math.max(1, Math.min(101, Number(event.target.value) || 1)))} />px</label><label>Gaussian σ<input type="number" min="0" max="20" step="0.5" value={sigma} onChange={event => setSigma(Math.max(0, Math.min(20, Number(event.target.value) || 0)))} />px</label></div></header>{!scanLine && <p className="profile-empty">选择“线扫描”工具，在图像上拖出一条线；然后重新运行分析。</p>}<canvas ref={profileCanvas} aria-label="通道 A 与 B 的线扫描曲线" /><div className="legend"><span><i className="dot cyan" />通道 A</span><span><i className="dot magenta" />通道 B</span><span>横轴：{pixelSize === 1 ? 'pixel' : `µm（${pixelSize} µm/px）`}</span><span>{sigma > 0 ? `显示 Gaussian σ=${sigma}px；CSV 保留原始曲线` : '未平滑'}</span></div></article>
+        <article className="result-card profile-card"><header><div><span>荧光线扫描</span><small>沿线每 1 px 双线性采样；线宽内取 mean ± sample SD</small></div><div className="profile-controls"><label>线宽<input type="number" min="1" max="101" value={lineWidth} onChange={event => setLineWidth(Math.max(1, Math.min(101, Number(event.target.value) || 1)))} />px</label><label>Gaussian σ<input type="number" min="0" max="20" step="0.5" value={sigma} onChange={event => setSigma(Math.max(0, Math.min(20, Number(event.target.value) || 0)))} />px</label></div></header>{!scanLine && <p className="profile-empty">选择“线扫描”工具，在图像上拖出一条线；然后重新运行分析。</p>}<canvas ref={profileCanvas} aria-label="通道 A 与 B 的线扫描曲线" /><div className="legend"><span><i className="dot cyan" />通道 A</span><span><i className="dot magenta" />通道 B</span><span>横轴：{pixelSize ? `µm（${pixelSize} µm/px）` : 'pixel（未标定）'}</span><span>{sigma > 0 ? `显示 Gaussian σ=${sigma}px；CSV 保留原始曲线` : '未平滑'}</span></div></article>
 
         <div className="qa-grid">
           <article className="qa-card"><span>输入质控</span>{image ? <ul><li>{image.fileName}</li><li>SHA-256：{image.hash.slice(0, 12)}…</li><li>{image.width} × {image.height} px · {image.format}</li><li>通道位深：{image.channels.map(channel => `${channel.label} ${channel.bitDepth}-bit`).join('；')}</li></ul> : <p>载入图像后显示来源与位深。</p>}</article>
