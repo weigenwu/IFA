@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import './globals.css';
 
 export const metadata: Metadata = {
+  metadataBase: new URL('https://fluoroscope-ifa.yu2898296277.chatgpt.site'),
   title: 'FluoroScope｜免疫荧光共定位与强度分析',
   description: '在浏览器本地完成免疫荧光共定位、ROI 强度与线扫描分析。',
   openGraph: {
