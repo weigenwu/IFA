@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { calculateColocalization, intensityStats, lineProfile, type ChannelData } from '../lib/analysis.ts';
+import { collapsePseudocolor } from '../lib/image.ts';
 
 const channel = (id: string, values: number[], maxValue = Math.max(...values, 1)): ChannelData => ({
   id,
@@ -58,4 +59,29 @@ test('horizontal line profile samples a known gradient', () => {
   const profile = lineProfile(channel('a', gradient), channel('b', gradient), 5, 5, { x1: 0, y1: 2, x2: 4, y2: 2 }, 1, 0);
   assert.deepEqual(profile.rawA, [0, 1, 2, 3, 4]);
   assert.deepEqual(profile.rawB, [0, 1, 2, 3, 4]);
+});
+
+test('single-signal pseudocolor collapses instead of becoming fake channels', () => {
+  const rgb: ChannelData[] = [
+    { id: 'r', label: 'R', data: new Uint8Array([0, 100, 200]), maxValue: 255, bitDepth: 8, integer: true },
+    { id: 'g', label: 'G', data: new Uint8Array([0, 80, 160]), maxValue: 255, bitDepth: 8, integer: true },
+    { id: 'b', label: 'B', data: new Uint8Array([0, 0, 0]), maxValue: 255, bitDepth: 8, integer: true },
+  ];
+  const signal = collapsePseudocolor(rgb);
+  assert.equal(signal?.id, 'signal');
+  assert.deepEqual(Array.from(signal?.data ?? []), [0, 100, 200]);
+});
+
+test('independent RGB signals are not collapsed', () => {
+  const rgb: ChannelData[] = [
+    { id: 'r', label: 'R', data: new Uint8Array([0, 1, 0, 1]), maxValue: 255, bitDepth: 8, integer: true },
+    { id: 'g', label: 'G', data: new Uint8Array([0, 0, 1, 1]), maxValue: 255, bitDepth: 8, integer: true },
+    { id: 'b', label: 'B', data: new Uint8Array([1, 0, 0, 1]), maxValue: 255, bitDepth: 8, integer: true },
+  ];
+  assert.equal(collapsePseudocolor(rgb), null);
+});
+
+test('12-bit saturation uses 4095 rather than Uint16 container maximum', () => {
+  const raw12: ChannelData = { id: 'raw12', label: '12-bit', data: new Uint16Array([0, 4094, 4095, 4095]), maxValue: 4095, bitDepth: 12, integer: true };
+  assert.equal(intensityStats(raw12, 4, 1, null).saturationPct, 50);
 });
