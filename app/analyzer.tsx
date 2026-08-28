@@ -21,6 +21,7 @@ type View = 'overlay' | 'a' | 'b' | 'mask';
 type ThresholdMethod = 'costes' | 'otsu' | 'manual' | 'none';
 type BackgroundMethod = 'none' | 'roi' | 'percentile';
 type AnalysisMode = 'colocalization' | 'intensity';
+type Pseudocolor = 'green' | 'red' | 'blue' | 'cyan' | 'magenta' | 'yellow' | 'gray';
 
 interface AnalysisState {
   signature: string;
@@ -32,6 +33,15 @@ interface AnalysisState {
 }
 
 const COLORS = { ink: '#10222a', cyan: '#18c4c7', magenta: '#f1538a', grid: '#35535b' };
+const PSEUDOCOLORS: Record<Pseudocolor, { label: string; css: string; rgb: [number, number, number] }> = {
+  green: { label: '绿色', css: '#32d17d', rgb: [0.2, 0.82, 0.49] },
+  red: { label: '红色', css: '#ff4d67', rgb: [1, 0.3, 0.4] },
+  blue: { label: '蓝色', css: '#4f83ff', rgb: [0.31, 0.51, 1] },
+  cyan: { label: '青色', css: '#18c4c7', rgb: [0.09, 0.77, 0.78] },
+  magenta: { label: '洋红', css: '#f153b7', rgb: [0.95, 0.33, 0.72] },
+  yellow: { label: '黄色', css: '#f2cc45', rgb: [0.95, 0.8, 0.27] },
+  gray: { label: '灰度', css: '#dce6e7', rgb: [0.86, 0.9, 0.91] },
+};
 const thresholdLabels: Record<ThresholdMethod, string> = { costes: 'Costes 自动', otsu: 'Otsu 自动', manual: '手动阈值', none: '零阈值' };
 const backgroundLabels: Record<BackgroundMethod, string> = { none: '未校正', roi: '背景 ROI 均值', percentile: '分析 ROI 第 5 百分位' };
 
@@ -85,6 +95,8 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   const [error, setError] = useState('');
   const [draggingFile, setDraggingFile] = useState(false);
   const [allowDisplayOnly, setAllowDisplayOnly] = useState(false);
+  const [colorA, setColorA] = useState<Pseudocolor>('green');
+  const [colorB, setColorB] = useState<Pseudocolor>('red');
   const fileInput = useRef<HTMLInputElement>(null);
   const imageCanvas = useRef<HTMLCanvasElement>(null);
   const overlayCanvas = useRef<HTMLCanvasElement>(null);
@@ -149,6 +161,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     const lowB = percentileInRoi(channelB, image.width, image.height, null, 0.01);
     const highB = percentileInRoi(channelB, image.width, image.height, null, 0.995);
     const rangeA = Math.max(1e-12, highA - lowA), rangeB = Math.max(1e-12, highB - lowB);
+    const rgbA = PSEUDOCOLORS[colorA].rgb, rgbB = PSEUDOCOLORS[colorB].rgb;
     for (let y = 0; y < canvas.height; y++) {
       const sourceY = Math.min(image.height - 1, Math.floor(y / canvas.height * image.height));
       for (let x = 0; x < canvas.width; x++) {
@@ -157,9 +170,11 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
         const target = (y * canvas.width + x) * 4;
         const a = Math.min(1, Math.max(0, (Number(channelA.data[source]) - lowA) / rangeA));
         const b = Math.min(1, Math.max(0, (Number(channelB.data[source]) - lowB) / rangeB));
-        let red = b, green = a, blue = Math.max(a, b);
-        if (view === 'a') { red = 0; green = a; blue = a; }
-        if (view === 'b') { red = b; green = 0; blue = b; }
+        let red = Math.min(1, a * rgbA[0] + b * rgbB[0]);
+        let green = Math.min(1, a * rgbA[1] + b * rgbB[1]);
+        let blue = Math.min(1, a * rgbA[2] + b * rgbB[2]);
+        if (view === 'a') { red = a * rgbA[0]; green = a * rgbA[1]; blue = a * rgbA[2]; }
+        if (view === 'b') { red = b * rgbB[0]; green = b * rgbB[1]; blue = b * rgbB[2]; }
         if (view === 'mask') {
           const positive = analysis?.coloc && Number(channelA.data[source]) - background.a > analysis.coloc.thresholdA && Number(channelB.data[source]) - background.b > analysis.coloc.thresholdB;
           if (positive) { red = green = blue = 1; } else { red *= .18; green *= .18; blue *= .18; }
@@ -168,7 +183,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       }
     }
     context.putImageData(pixels, 0, 0);
-  }, [image, channelA, channelB, previewSize, view, analysis, background]);
+  }, [image, channelA, channelB, previewSize, view, analysis, background, colorA, colorB]);
 
   useEffect(() => {
     const canvas = overlayCanvas.current;
@@ -244,8 +259,8 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       values.forEach((value, index) => { const x = index / Math.max(1, values.length - 1) * width; const y = height - (value - min) / range * height; if (!index) context.moveTo(x, y); else context.lineTo(x, y); });
       context.stroke();
     };
-    draw(valuesA, COLORS.cyan); draw(valuesB, COLORS.magenta);
-  }, [analysis, sigma]);
+    draw(valuesA, PSEUDOCOLORS[colorA].css); draw(valuesB, PSEUDOCOLORS[colorB].css);
+  }, [analysis, sigma, colorA, colorB]);
 
   const pointFromEvent = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const box = event.currentTarget.getBoundingClientRect();
@@ -300,7 +315,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       ['section', 'channel', 'metric', 'value', 'unit'],
       ['metadata', '', 'file_name', image.fileName, ''], ['metadata', '', 'sha256', image.hash, ''],
       ['metadata', '', 'width', image.width, 'px'], ['metadata', '', 'height', image.height, 'px'],
-      ['metadata', '', 'analysis_mode', mode, ''], ['metadata', '', 'display_only_input', image.displayOnly ? 'yes' : 'no', ''], ['metadata', '', 'pixel_size', pixelSize || '', pixelSize ? 'µm/px' : 'not_set'],
+      ['metadata', '', 'analysis_mode', mode, ''], ['metadata', '', 'display_only_input', image.displayOnly ? 'yes' : 'no', ''], ['metadata', '', 'display_color_A', PSEUDOCOLORS[colorA].label, ''], ['metadata', '', 'display_color_B', PSEUDOCOLORS[colorB].label, ''], ['metadata', '', 'pixel_size', pixelSize || '', pixelSize ? 'µm/px' : 'not_set'],
       ['metadata', '', 'background_method', backgroundLabels[backgroundMethod], ''],
     ];
     if (analysis.coloc) {
@@ -337,7 +352,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       schema: 'FluoroScope analysis 1.1', mode, createdAt: analysis.createdAt,
       source: { fileName: image.fileName, sourceFiles: image.sourceFiles, sha256: image.hash, format: image.format, width: image.width, height: image.height, pageCount: image.pageCount, displayOnly: image.displayOnly },
       channels: { a: { id: channelA.id, label: channelA.label, bitDepth: channelA.bitDepth }, b: { id: channelB.id, label: channelB.label, bitDepth: channelB.bitDepth } },
-      parameters: { roi, backgroundRoi, backgroundMethod, background, thresholdMethod, manualThresholdPercent: { a: manualA, b: manualB }, scanLine, lineWidthPx: lineWidth, gaussianSigmaPx: sigma, pixelSizeUm: pixelSize || null, comparison: 'strict >', costesSignificanceTest: false },
+      parameters: { roi, backgroundRoi, backgroundMethod, background, thresholdMethod, manualThresholdPercent: { a: manualA, b: manualB }, displayColors: { a: colorA, b: colorB }, scanLine, lineWidthPx: lineWidth, gaussianSigmaPx: sigma, pixelSizeUm: pixelSize || null, comparison: 'strict >', costesSignificanceTest: false },
       results: mode === 'colocalization' ? { colocalization: analysis.coloc } : { intensityA: analysis.intensityA, intensityB: analysis.intensityB, lineProfile: analysis.profile },
       warnings: [...image.warnings, ...(image.displayOnly ? ['本结果由展示图风险确认后生成，仅供探索。'] : []), ...(analysis.coloc?.warnings ?? []), ...(mode === 'colocalization' ? ['共定位不等于分子相互作用。'] : [])],
     };
@@ -362,7 +377,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       </header>
 
       <section className="intro">
-        <div><p className="eyebrow">{isColoc ? 'COLOCALIZATION' : 'INTENSITY & LINE SCAN'}</p><h1>{isColoc ? '两个通道，回答一个共现问题。' : '从 ROI 到曲线，保留原始强度。'}</h1><p className="lede">{isColoc ? '从多通道 OME-TIFF 或多份对齐的分通道 TIFF 中任选两个通道，独立输出共定位指标、散点图与 Mask。' : '逐通道量化 ROI、背景校正、CTCF 与饱和率，并沿画线生成可导出的双通道强度曲线。'}</p></div>
+        <div><p className="eyebrow">{isColoc ? 'COLOCALIZATION' : 'INTENSITY & LINE SCAN'}</p><h1>{isColoc ? '两个通道，回答一个共现问题。' : '从自定义 ROI 到强度曲线。'}</h1><p className="lede">{isColoc ? '从多通道 OME-TIFF 或多份对齐的分通道 TIFF 中任选两个通道，独立输出共定位指标、散点图与 Mask。' : '在图像上拖拽框选任意矩形区域，逐通道量化强度、背景校正、CTCF 与饱和率；伪彩可自由切换且不改变计算值。'}</p></div>
         <div className="workflow" aria-label="分析流程"><span className={image ? '' : 'active'}>01 上传</span><i /><span className={image && !analysis ? 'active' : ''}>02 选区</span><i /><span className={analysis ? 'active' : ''}>03 分析</span><i /><span>04 导出</span></div>
       </section>
 
@@ -375,7 +390,9 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
           </div>
           {image && <div className="file-facts"><span>{image.format}</span><span>{image.width} × {image.height}</span><span>{image.channels.length} CH</span><span>{image.channels.map(channel => `${channel.bitDepth}-bit`).join(' / ')}</span></div>}
 
-          <div className="field-group"><p>{isColoc ? '共定位通道' : '强度与线扫通道'}</p><label><span className="dot cyan" />通道 A<select value={channelAId} onChange={event => setChannelAId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{channel.label}</option>)}</select></label><label><span className="dot magenta" />通道 B<select value={channelBId} onChange={event => setChannelBId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{channel.label}</option>)}</select></label></div>
+          <div className="field-group"><p>{isColoc ? '共定位通道' : '强度与线扫通道'}</p><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[colorA].css }} />通道 A<select value={channelAId} onChange={event => setChannelAId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{channel.label}</option>)}</select></label><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[colorB].css }} />通道 B<select value={channelBId} onChange={event => setChannelBId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{channel.label}</option>)}</select></label></div>
+
+          <div className="field-group"><p>显示伪彩</p><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[colorA].css }} />通道 A<select value={colorA} onChange={event => setColorA(event.target.value as Pseudocolor)}>{Object.entries(PSEUDOCOLORS).map(([value, color]) => <option key={value} value={value}>{color.label}</option>)}</select></label><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[colorB].css }} />通道 B<select value={colorB} onChange={event => setColorB(event.target.value as Pseudocolor)}>{Object.entries(PSEUDOCOLORS).map(([value, color]) => <option key={value} value={value}>{color.label}</option>)}</select></label><small className="field-help">只改变预览与曲线颜色，不改变原始像素和分析结果。</small></div>
 
           {isColoc && <div className="field-group"><p>阈值</p><label className="wide-field">方法<select value={thresholdMethod} onChange={event => setThresholdMethod(event.target.value as ThresholdMethod)}><option value="costes">Costes 自动</option><option value="otsu">Otsu 自动</option><option value="manual">手动阈值</option><option value="none">零阈值</option></select></label>{thresholdMethod === 'manual' && <div className="range-pair"><label>A {manualA}%<input type="range" min="0" max="100" value={manualA} onChange={event => setManualA(Number(event.target.value))} /></label><label>B {manualB}%<input type="range" min="0" max="100" value={manualB} onChange={event => setManualB(Number(event.target.value))} /></label></div>}</div>}
 
@@ -389,7 +406,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
             {!image && <div className="empty-canvas"><div className="scan-grid" /><span className="crosshair" aria-hidden="true" /><p>等待图像</p><small>支持五通道二维 OME-TIFF 与多文件组合</small></div>}
             {image && <div className="canvas-stack" style={{ aspectRatio: `${image.width}/${image.height}` }}><canvas ref={imageCanvas} /><canvas ref={overlayCanvas} aria-label={`在图像上绘制${tool === 'roi' ? '分析 ROI' : tool === 'background' ? '背景 ROI' : '线扫描'}`} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={() => { setDragStart(null); setDraft(null); }} /></div>}
           </div>
-          <div className="stage-tools" aria-label="绘图工具"><button className={tool === 'roi' ? 'selected' : ''} onClick={() => setTool('roi')}><b>□</b>分析 ROI</button><button className={tool === 'background' ? 'selected' : ''} onClick={() => setTool('background')}><b>▧</b>背景 ROI</button>{!isColoc && <button className={tool === 'line' ? 'selected' : ''} onClick={() => setTool('line')}><b>╱</b>线扫描</button>}<span className="tool-spacer" /><button onClick={() => setRoi(null)}>全图</button><button onClick={() => { setRoi(null); setBackgroundRoi(null); setScanLine(null); }}>清除标注</button></div>
+          <div className="stage-tools" aria-label="绘图工具"><button className={tool === 'roi' ? 'selected' : ''} onClick={() => setTool('roi')}><b>□</b>{isColoc ? '分析 ROI' : '自定义 ROI'}</button><button className={tool === 'background' ? 'selected' : ''} onClick={() => setTool('background')}><b>▧</b>背景 ROI</button>{!isColoc && <button className={tool === 'line' ? 'selected' : ''} onClick={() => setTool('line')}><b>╱</b>线扫描</button>}<span className="tool-spacer" /><button onClick={() => setRoi(null)}>使用全图</button><button onClick={() => { setRoi(null); setBackgroundRoi(null); setScanLine(null); }}>清除标注</button></div>
           <div className="stage-foot"><span>ROI：{roiText}</span>{!isColoc && <span>线长：{scanLine ? `${format(lineLength, 1)} px${pixelSize ? ` / ${format(lineLength * pixelSize, 2)} µm` : ''}` : '—'}</span>}<span>BG A/B：{format(background.a, 2)} / {format(background.b, 2)}</span></div>
         </div>
 
@@ -414,13 +431,13 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
         <div className="section-title"><div><p className="eyebrow">RESULTS</p><h2>{isColoc ? '共定位结果与质控' : '强度结果与线扫描'}</h2></div>{analysis && <div className="export-actions"><button onClick={exportRows}>导出指标 CSV</button><button onClick={exportJson}>导出完整 JSON</button>{analysis.profile && <button onClick={exportProfile}>导出线扫 CSV</button>}</div>}</div>
 
         {isColoc && <div className="result-grid">
-          <article className="result-card scatter-card"><header><div><span>共定位散点图</span><small>黄线：阈值 · 洋红线：Costes 回归</small></div><b>{analysis?.coloc ? thresholdLabels[thresholdMethod] : '等待分析'}</b></header><canvas ref={scatterCanvas} aria-label="通道 A 与 B 的强度散点图" /><div className="legend"><span><i className="dot cyan" />X：通道 A</span><span><i className="dot magenta" />Y：通道 B</span></div></article>
+          <article className="result-card scatter-card"><header><div><span>共定位散点图</span><small>黄线：阈值 · 洋红线：Costes 回归</small></div><b>{analysis?.coloc ? thresholdLabels[thresholdMethod] : '等待分析'}</b></header><canvas ref={scatterCanvas} aria-label="通道 A 与 B 的强度散点图" /><div className="legend"><span><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[colorA].css }} />X：通道 A</span><span><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[colorB].css }} />Y：通道 B</span></div></article>
           <article className="result-card coefficients"><header><div><span>共定位指标</span><small>相关与共现分开报告</small></div></header><dl><div><dt>Pearson（无阈值）</dt><dd>{analysis?.coloc ? format(analysis.coloc.pearson) : '—'}</dd></div><div><dt>Pearson（阈值下）</dt><dd>{analysis?.coloc ? format(analysis.coloc.pearsonBelow) : '—'}</dd></div><div><dt>Pearson（阈值上）</dt><dd>{analysis?.coloc ? format(analysis.coloc.pearsonAbove) : '—'}</dd></div><div><dt>Manders M1 / M2</dt><dd>{analysis?.coloc ? `${format(analysis.coloc.m1)} / ${format(analysis.coloc.m2)}` : '—'}</dd></div><div><dt>Manders tM1 / tM2</dt><dd>{analysis?.coloc ? `${format(analysis.coloc.tm1)} / ${format(analysis.coloc.tm2)}` : '—'}</dd></div><div><dt>Manders overlap</dt><dd>{analysis?.coloc ? format(analysis.coloc.overlap) : '—'}</dd></div><div><dt>Li ICQ</dt><dd>{analysis?.coloc ? format(analysis.coloc.icq) : '—'}</dd></div><div><dt>双阳性像素</dt><dd>{analysis?.coloc ? `${analysis.coloc.colocPixels.toLocaleString()} (${format(analysis.coloc.colocAreaPct, 2)}%)` : '—'}</dd></div></dl></article>
         </div>}
 
         {!isColoc && <>
-          <article className="result-card intensity-card"><header><div><span>ROI 荧光强度</span><small>RawIntDen、背景校正与 CTCF 均基于原始像素值</small></div><b>{roi ? `ROI ${roiText}` : '全图'}</b></header><div className="table-wrap"><table><thead><tr><th>通道</th><th>像素数</th><th>Mean</th><th>Median</th><th>SD</th><th>Min–Max</th><th>RawIntDen</th><th>Background</th><th>Corrected Mean</th><th>CTCF</th><th>饱和</th></tr></thead><tbody>{intensityRows.map(({ channel, stats, color }) => <tr key={channel.id}><td><i className={`dot ${color}`} />{channel.label}</td><td>{stats ? stats.pixels.toLocaleString() : '—'}</td><td>{stats ? format(stats.mean, 2) : '—'}</td><td>{stats ? format(stats.median, 2) : '—'}</td><td>{stats ? format(stats.sd, 2) : '—'}</td><td>{stats ? `${format(stats.min, 1)}–${format(stats.max, 1)}` : '—'}</td><td>{stats ? format(stats.sum, 1) : '—'}</td><td>{stats ? format(stats.backgroundMean, 2) : '—'}</td><td>{stats ? format(stats.correctedMean, 2) : '—'}</td><td>{stats ? format(stats.ctcf, 1) : '—'}</td><td>{stats ? `${format(stats.saturationPct, 2)}%` : '—'}</td></tr>)}</tbody></table></div></article>
-          <article className="result-card profile-card"><header><div><span>荧光线扫描</span><small>沿线每 1 px 双线性采样；线宽内取 mean ± sample SD</small></div><div className="profile-controls"><label>线宽<input type="number" min="1" max="101" value={lineWidth} onChange={event => setLineWidth(Math.max(1, Math.min(101, Number(event.target.value) || 1)))} />px</label><label>Gaussian σ<input type="number" min="0" max="20" step="0.5" value={sigma} onChange={event => setSigma(Math.max(0, Math.min(20, Number(event.target.value) || 0)))} />px</label></div></header>{!scanLine && <p className="profile-empty">选择“线扫描”工具，在图像上拖出一条线；然后运行分析。</p>}<canvas ref={profileCanvas} aria-label="通道 A 与 B 的线扫描曲线" /><div className="legend"><span><i className="dot cyan" />通道 A</span><span><i className="dot magenta" />通道 B</span><span>横轴：{pixelSize ? `µm（${pixelSize} µm/px）` : 'pixel（未标定）'}</span><span>{sigma > 0 ? `显示 Gaussian σ=${sigma}px；CSV 保留原始曲线` : '未平滑'}</span></div></article>
+          <article className="result-card intensity-card"><header><div><span>自定义 ROI 荧光强度</span><small>在图像上拖拽框选；RawIntDen、背景校正与 CTCF 基于原始像素值</small></div><b>{roi ? `ROI ${roiText}` : '全图'}</b></header><div className="table-wrap"><table><thead><tr><th>通道</th><th>像素数</th><th>Mean</th><th>Median</th><th>SD</th><th>Min–Max</th><th>RawIntDen</th><th>Background</th><th>Corrected Mean</th><th>CTCF</th><th>饱和</th></tr></thead><tbody>{intensityRows.map(({ channel, stats }, index) => <tr key={channel.id}><td><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[index ? colorB : colorA].css }} />{channel.label}</td><td>{stats ? stats.pixels.toLocaleString() : '—'}</td><td>{stats ? format(stats.mean, 2) : '—'}</td><td>{stats ? format(stats.median, 2) : '—'}</td><td>{stats ? format(stats.sd, 2) : '—'}</td><td>{stats ? `${format(stats.min, 1)}–${format(stats.max, 1)}` : '—'}</td><td>{stats ? format(stats.sum, 1) : '—'}</td><td>{stats ? format(stats.backgroundMean, 2) : '—'}</td><td>{stats ? format(stats.correctedMean, 2) : '—'}</td><td>{stats ? format(stats.ctcf, 1) : '—'}</td><td>{stats ? `${format(stats.saturationPct, 2)}%` : '—'}</td></tr>)}</tbody></table></div></article>
+          <article className="result-card profile-card"><header><div><span>荧光线扫描</span><small>沿线每 1 px 双线性采样；线宽内取 mean ± sample SD</small></div><div className="profile-controls"><label>线宽<input type="number" min="1" max="101" value={lineWidth} onChange={event => setLineWidth(Math.max(1, Math.min(101, Number(event.target.value) || 1)))} />px</label><label>Gaussian σ<input type="number" min="0" max="20" step="0.5" value={sigma} onChange={event => setSigma(Math.max(0, Math.min(20, Number(event.target.value) || 0)))} />px</label></div></header>{!scanLine && <p className="profile-empty">选择“线扫描”工具，在图像上拖出一条线；然后运行分析。</p>}<canvas ref={profileCanvas} aria-label="通道 A 与 B 的线扫描曲线" /><div className="legend"><span><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[colorA].css }} />通道 A · {PSEUDOCOLORS[colorA].label}</span><span><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[colorB].css }} />通道 B · {PSEUDOCOLORS[colorB].label}</span><span>横轴：{pixelSize ? `µm（${pixelSize} µm/px）` : 'pixel（未标定）'}</span><span>{sigma > 0 ? `显示 Gaussian σ=${sigma}px；CSV 保留原始曲线` : '未平滑'}</span></div></article>
         </>}
 
         <div className="qa-grid">

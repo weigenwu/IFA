@@ -69,6 +69,7 @@ h2 { font-size:clamp(30px,3.5vw,50px); line-height:1.08; }
 .field-group>p { margin:0 0 9px; font-size:10px; font-weight:800; letter-spacing:.07em; }
 .field-group>label:not(.number-field),.wide-field { display:grid; grid-template-columns:10px 54px 1fr; align-items:center; gap:6px; margin-top:7px; color:#64757a; font-size:9px; }
 .field-group .wide-field { grid-template-columns:46px 1fr; }
+.field-help { display:block; margin:8px 0 0; color:#819095; font-size:8px; line-height:1.5; }
 .dot { width:8px; height:8px; display:inline-block; border-radius:50%; flex:none; }.dot.cyan{background:var(--cyan)}.dot.magenta{background:var(--magenta)}
 select,input[type="number"] { min-width:0; height:30px; border:1px solid var(--line); border-radius:6px; background:white; color:#2d4249; font-size:9px; padding:0 7px; }
 .range-pair { display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:9px; }.range-pair label { color:#66777c; font-size:9px; }.range-pair input { display:block; width:100%; accent-color:var(--cyan); }

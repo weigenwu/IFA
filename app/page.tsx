@@ -29,8 +29,8 @@ export default function Home() {
           <span className="tool-index">02 · INTENSITY & LINE SCAN</span>
           <div className="line-glyph" aria-hidden="true"><i /><i /><i /><i /><i /></div>
           <h2>荧光强度</h2>
-          <p>逐通道测量 ROI 强度、背景校正、CTCF 与饱和率，并沿任意画线生成双通道曲线。</p>
-          <ul><li>分析 ROI 与背景 ROI</li><li>Mean / RawIntDen / CTCF</li><li>线扫描及 CSV 导出</li></ul>
+          <p>在图像上拖拽框选自定义 ROI，测量强度、背景校正、CTCF 与饱和率，并可自由切换通道伪彩。</p>
+          <ul><li>自定义 ROI 与背景 ROI</li><li>绿色 / 红色等伪彩切换</li><li>线扫描及 CSV 导出</li></ul>
           <strong>进入强度分析 <span>→</span></strong>
         </a>
       </section>

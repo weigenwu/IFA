@@ -7,7 +7,7 @@
 ## 两个独立入口
 
 - `/colocalization`：从多通道图像中任选 A/B，输出 Pearson、Manders、阈值、散点图与共定位 Mask。
-- `/intensity`：输出 ROI Mean、Median、SD、RawIntDen、背景校正、CTCF、饱和比例与双通道线扫描。
+- `/intensity`：在图像上拖拽框选自定义矩形 ROI，输出 Mean、Median、SD、RawIntDen、背景校正、CTCF、饱和比例与双通道线扫描。
 
 ## 输入适配
 
@@ -16,6 +16,7 @@
 - 多份同尺寸分通道 TIFF：一次选择最多 8 个文件，组合后从通道列表中选择；网页不做配准。
 - PNG/JPEG 与伪彩/合并 RGB：标记为展示图，默认阻止定量；只能在明确确认风险后做探索性分析。
 - Olympus `.oir`：普通浏览器不能可靠解析。网页会提示先用 Fiji / Bio-Formats 导出二维 OME-TIFF 或保持原始位深的分通道灰度 TIFF。
+- 通道伪彩可在绿色、红色、蓝色、青色、洋红、黄色和灰度之间切换；只改变预览与曲线，不改变原始像素或计算结果。
 
 检测到 Z-stack 或时间序列 OME-TIFF 时，网页不会猜测 C/Z/T 顺序，而是要求先在 Fiji 选择单层或生成投影。
 
