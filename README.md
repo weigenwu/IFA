@@ -2,12 +2,14 @@
 
 两个在浏览器本地运行的免疫荧光分析工具：**荧光共定位**与**荧光强度/线扫描**。Olympus FV3000 OIR 和 TIFF 图像都不会上传到服务器，也不需要账号登录；原始像素用于计算，画布仅用于显示。
 
-**在线使用：<https://fluoroscope-ifa.yu2898296277.chatgpt.site>**
+**公开入口（无需登录）：<https://weigenwu.github.io/IFA/>**
+
+备用入口：<https://fluoroscope-ifa.yu2898296277.chatgpt.site>
 
 ## 两个独立入口
 
 - `/colocalization`：从多通道图像中任选 A/B，输出 Pearson、Manders、阈值、散点图与共定位 Mask。
-- `/intensity`：在图像上拖拽框选自定义矩形 ROI，输出 Mean、Median、SD、RawIntDen、背景校正、CTCF、饱和比例与双通道线扫描。
+- `/intensity`：勾选 1–8 个通道，设置奥林巴斯风格伪彩与显示黑场，框选固定边长正方形 ROI，输出强度指标、双通道线扫描及带比例尺的裁切图。
 
 ## 输入适配
 
@@ -16,27 +18,27 @@
 - 普通 8/16/32-bit TIFF：支持多页/多样本，不再限制为前三个通道。
 - 多份同尺寸分通道 TIFF：一次选择最多 8 个文件，组合后从通道列表中选择；网页不做配准。
 - PNG/JPEG 与伪彩/合并 RGB：标记为展示图，默认阻止定量；只能在明确确认风险后做探索性分析。
-- 通道伪彩可在绿色、红色、蓝色、青色、洋红、黄色和灰度之间切换；只改变预览与曲线，不改变原始像素或计算结果。
+- 通道伪彩可在绿色、红色、蓝色、青色、洋红、黄色、橙色、紫色和白色/灰度之间切换；只改变预览与裁切图，不改变原始像素或计算结果。TD 透射光默认不参与强度分析，但可手动选入。
 
 OIR 直接读取当前限定为单文件、未压缩的 FV3000 数据，单文件不超过 512 MB，并且同目录不能存在同名 `_00001`、`_00002` 等伴随文件。网页会用采集轴元数据核对 Z 层；若计划层数多于完整层数，会在页面和导出结果中明确警告中断采集或缺少伴随文件。时间序列、光谱扫描、mosaic、压缩像素或未知布局会停止，后续可接入独立 Bio-Formats 服务作为兼容兜底。检测到 Z-stack 或时间序列 OME-TIFF 时，网页仍不会猜测 C/Z/T 顺序。
 
 ## 功能
 
 - Olympus FV3000 OIR、OME-TIFF、PNG、JPEG 与 8/16/32-bit TIFF
-- 矩形分析 ROI、独立背景 ROI、背景第 5 百分位快捷校正
+- 共定位矩形 ROI；强度页固定边长正方形 ROI；独立背景 ROI与第 5 百分位快捷校正
 - Costes、Otsu、手动或零阈值
 - Pearson（无阈值/阈值下/阈值上）、M1/M2、tM1/tM2、Manders overlap、Li ICQ
 - ROI 强度：像素数、Mean、Median、sample SD、Min/Max、RawIntDen、背景均值/SD、Corrected Mean、CTCF、饱和比例
 - 线扫描：每 1 px 双线性采样、指定线宽内 mean ± sample SD、可选 Gaussian 派生曲线
-- 指标 CSV、线扫 CSV 与包含 SHA-256、ROI、参数、告警的 JSON
+- 指标 CSV、线扫 CSV、完整 JSON，以及原始 ROI 尺寸的 PNG/JPG/8-bit RGB 伪彩 TIFF 裁切图
 
 ## 使用
 
 1. 选择共定位或强度工具。
 2. 直接上传一个 `.oir`、二维 OME-TIFF，或同时选择多份同尺寸分通道 TIFF。
-3. 映射通道 A/B；必要时画分析 ROI 与背景 ROI。
-4. 共定位页选择阈值；强度页可画线扫描。运行分析并检查质控提示。
-5. 导出该工具独立的指标 CSV、完整 JSON；强度页还可导出线扫 CSV。
+3. 共定位页映射 A/B；强度页勾选 1–8 个通道并调整名称、伪彩与显示黑场。
+4. 强度页拖拽正方形裁剪区，可输入统一边长；核对 OIR 像素尺寸并设置比例尺。定量扣背景与显示黑场相互独立。
+5. 运行分析并检查质控；导出 CSV/JSON，或直接导出当前裁剪区的 PNG、JPG、TIFF。
 
 JPEG、截图和社交平台图片经过有损或 8-bit 转换，只适合探索性分析。跨样本强度比较必须保持曝光、增益、激光功率、探测器设置及位深一致。
 
@@ -59,13 +61,14 @@ npm install
 npm run dev
 npm test
 npm run build
+npm run build:pages
 ```
 
 需要 Node.js 22.13 或更高版本。
 
 ## 验证
 
-`tests/analysis.test.ts` 覆盖完全相关、完全反相关、无线性相关但有重叠、方向不对称 Manders、常量通道、CTCF、已知梯度线扫描、单通道伪彩识别、12-bit 饱和判断以及 OIR 元数据、像素块、Z-MIP 与不完整尾层处理。
+`tests/analysis.test.ts` 覆盖分析指标与 OIR 读取；`tests/roi-export.test.ts` 覆盖精确 ROI 尺寸、显示黑场、比例尺和可回读的 8-bit RGB 伪彩 TIFF。
 
 本项目附带的 51 个 FV3000 OIR（48 个二维、3 个 8 层 Z-stack；512×512 或 1024×1024，5 通道，12-bit）均已与 Bio-Formats 8.1.1 逐文件核对 X/Y/C/Z/T、有效位深和每个输出通道的 SHA-256；不一致数为 0。投稿级使用前，仍建议用代表图像和固定 ROI 与 Fiji Coloc 2 / ImageJ 测量结果交叉核对。
 

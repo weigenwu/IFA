@@ -1,11 +1,9 @@
-/* eslint-disable @next/next/no-html-link-for-pages */
-
 export default function Home() {
   return (
     <main className="app-shell portal-shell">
       <header className="topbar">
-        <a className="brand" href="/" aria-label="FluoroScope 首页"><span className="brand-mark" aria-hidden="true"><i /><i /></span><span>FluoroScope</span></a>
-        <nav aria-label="分析工具"><a href="/colocalization">荧光共定位</a><a href="/intensity">荧光强度</a></nav>
+        <a className="brand" href="./" aria-label="FluoroScope 首页"><span className="brand-mark" aria-hidden="true"><i /><i /></span><span>FluoroScope</span></a>
+        <nav aria-label="分析工具"><a href="./colocalization/">荧光共定位</a><a href="./intensity/">荧光强度</a></nav>
         <span className="privacy-badge"><i /> 公开使用 · 无需登录</span>
       </header>
 
@@ -16,7 +14,7 @@ export default function Home() {
       </section>
 
       <section className="tool-portal" aria-label="选择分析工具">
-        <a className="tool-card coloc-tool" href="/colocalization">
+        <a className="tool-card coloc-tool" href="./colocalization/">
           <span className="tool-index">01 · COLOCALIZATION</span>
           <div className="tool-glyph" aria-hidden="true"><i /><i /><b /></div>
           <h2>荧光共定位</h2>
@@ -25,12 +23,12 @@ export default function Home() {
           <strong>进入共定位分析 <span>→</span></strong>
         </a>
 
-        <a className="tool-card intensity-tool" href="/intensity">
+        <a className="tool-card intensity-tool" href="./intensity/">
           <span className="tool-index">02 · INTENSITY & LINE SCAN</span>
           <div className="line-glyph" aria-hidden="true"><i /><i /><i /><i /><i /></div>
           <h2>荧光强度</h2>
-          <p>在图像上拖拽框选自定义 ROI，测量强度、背景校正、CTCF 与饱和率，并可自由切换通道伪彩。</p>
-          <ul><li>自定义 ROI 与背景 ROI</li><li>绿色 / 红色等伪彩切换</li><li>线扫描及 CSV 导出</li></ul>
+          <p>按奥林巴斯通道设置伪彩和显示背景，框选固定边长正方形 ROI，逐通道测量强度并导出裁切图。</p>
+          <ul><li>1–8 通道自定义名称与伪彩</li><li>正方形边长、µm 换算与比例尺</li><li>ROI PNG / JPG / TIFF 导出</li></ul>
           <strong>进入强度分析 <span>→</span></strong>
         </a>
       </section>
