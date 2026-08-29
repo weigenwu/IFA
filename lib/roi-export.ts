@@ -11,6 +11,8 @@ export interface RoiExportChannel {
   id: string;
   color: PseudocolorName | NormalizedRgb;
   enabled?: boolean;
+  /** Optional display-only floor, normally derived from a blank background ROI. */
+  displayFloor?: number;
 }
 
 export interface RoiExportMask {
@@ -202,7 +204,9 @@ export function renderRoiPseudocolor(options: RenderRoiOptions): RenderedRoi {
     if (channel.data.length < image.width * image.height) throw new Error(`通道 ${channel.label} 的像素数量不足。`);
     const baseLow = percentileInRoi(channel, image.width, image.height, null, 0);
     const high = percentileInRoi(channel, image.width, image.height, null, 1);
-    const low = baseLow + Math.max(0, high - baseLow) * blackPointPercent / 100;
+    const displayFloor = Number.isFinite(setting.displayFloor) ? Number(setting.displayFloor) : baseLow;
+    const displayLow = Math.min(high, Math.max(baseLow, displayFloor));
+    const low = displayLow + Math.max(0, high - displayLow) * blackPointPercent / 100;
     return { channel, rgb: colorRgb(setting.color), low, range: Math.max(1e-12, high - low) };
   });
   if (!selected.length) throw new Error('当前视图对应的通道未被选择，无法导出。');

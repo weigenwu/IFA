@@ -53,6 +53,8 @@ const PSEUDOCOLORS: Record<Pseudocolor, { label: string; css: string; rgb: [numb
 const thresholdLabels: Record<ThresholdMethod, string> = { costes: 'Costes 自动', otsu: 'Otsu 自动', manual: '手动阈值', none: '零阈值' };
 const backgroundLabels: Record<BackgroundMethod, string> = { none: '未校正', roi: '背景 ROI 均值', percentile: '分析 ROI 第 5 百分位' };
 const FALLBACK_COLORS: Pseudocolor[] = ['blue', 'green', 'red', 'magenta', 'cyan', 'yellow', 'orange', 'violet', 'gray'];
+const MAX_PREVIEW_HEIGHT = 800;
+const DISPLAY_BACKGROUND_SD_MULTIPLIER = 2;
 
 function isTransmittedLight(id: string, label: string) {
   const value = `${id} ${label}`.toLowerCase();
@@ -150,6 +152,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   const [colorB, setColorB] = useState<Pseudocolor>('red');
   const [intensitySettings, setIntensitySettings] = useState<IntensityChannelSetting[]>([]);
   const [displayBlackPoint, setDisplayBlackPoint] = useState(0);
+  const [suppressDisplayBackground, setSuppressDisplayBackground] = useState(false);
   const [showScaleBar, setShowScaleBar] = useState(true);
   const [scaleBarUm, setScaleBarUm] = useState(20);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -159,7 +162,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   const profileCanvas = useRef<HTMLCanvasElement>(null);
 
   const enabledIntensityIds = useMemo(() => intensitySettings.filter(setting => setting.enabled).map(setting => setting.id), [intensitySettings]);
-  const analysisSignature = useMemo(() => JSON.stringify({ mode, channelAId, channelBId, intensityChannels: enabledIntensityIds, roi, backgroundRoi, scanLine, thresholdMethod, manualA, manualB, backgroundMethod, lineWidth, sigma, pixelSize, allowDisplayOnly }), [mode, channelAId, channelBId, enabledIntensityIds, roi, backgroundRoi, scanLine, thresholdMethod, manualA, manualB, backgroundMethod, lineWidth, sigma, pixelSize, allowDisplayOnly]);
+  const analysisSignature = useMemo(() => JSON.stringify({ mode, channelAId, channelBId, intensityChannels: enabledIntensityIds, roi, backgroundRoi: backgroundMethod === 'roi' ? backgroundRoi : null, scanLine, thresholdMethod, manualA, manualB, backgroundMethod, lineWidth, sigma, pixelSize, allowDisplayOnly }), [mode, channelAId, channelBId, enabledIntensityIds, roi, backgroundRoi, scanLine, thresholdMethod, manualA, manualB, backgroundMethod, lineWidth, sigma, pixelSize, allowDisplayOnly]);
   const analysis = analysisState?.signature === analysisSignature ? analysisState : null;
 
   const channelA = image?.channels.find(channel => channel.id === channelAId) ?? image?.channels[0];
@@ -191,6 +194,16 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     });
     return result;
   }, [image, backgroundMethod, backgroundRoi, roi]);
+  const displayBackgroundByChannel = useMemo(() => {
+    const result = new Map<string, { mean: number; sd: number; floor: number }>();
+    if (!image || !backgroundRoi) return result;
+    image.channels.forEach(channel => {
+      const stats = intensityStats(channel, image.width, image.height, backgroundRoi);
+      const floor = stats.mean + DISPLAY_BACKGROUND_SD_MULTIPLIER * stats.sd;
+      if (Number.isFinite(floor)) result.set(channel.id, { mean: stats.mean, sd: stats.sd, floor });
+    });
+    return result;
+  }, [image, backgroundRoi]);
   const background = useMemo(() => ({
     a: backgroundByChannel.get(channelA?.id ?? '')?.mean ?? 0,
     b: backgroundByChannel.get(channelB?.id ?? '')?.mean ?? 0,
@@ -214,7 +227,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       setRoi(null); setBackgroundRoi(null); setScanLine(null); setView('overlay'); setTool('roi');
       const loadedPixelSize = loaded.pixelSizeUm ?? 0;
       setPixelSize(loadedPixelSize); setScaleBarUm(suggestedScaleBarUm(loaded.width, loadedPixelSize));
-      setDisplayBlackPoint(0); setShowScaleBar(true); setAllowDisplayOnly(false);
+      setDisplayBlackPoint(0); setSuppressDisplayBackground(false); setShowScaleBar(true); setAllowDisplayOnly(false);
     } catch (problem) {
       setImage(null);
       setError(problem instanceof Error ? problem.message : '无法读取该图像。');
@@ -234,7 +247,9 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     const stretches = displayChannels.map(item => {
       const baseLow = percentileInRoi(item.channel, image.width, image.height, null, 0);
       const high = percentileInRoi(item.channel, image.width, image.height, null, 1);
-      const low = baseLow + Math.max(0, high - baseLow) * displayBlackPoint / 100;
+      const backgroundFloor = suppressDisplayBackground ? displayBackgroundByChannel.get(item.channel.id)?.floor : undefined;
+      const displayLow = Number.isFinite(backgroundFloor) ? Math.min(high, Math.max(baseLow, Number(backgroundFloor))) : baseLow;
+      const low = displayLow + Math.max(0, high - displayLow) * displayBlackPoint / 100;
       return { ...item, low, range: Math.max(1e-12, high - low), rgb: PSEUDOCOLORS[item.color].rgb };
     });
     for (let y = 0; y < canvas.height; y++) {
@@ -259,7 +274,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       }
     }
     context.putImageData(pixels, 0, 0);
-  }, [image, channelA, channelB, previewSize, view, analysis, background.a, background.b, colorA, colorB, isColoc, intensityChannels, displayBlackPoint]);
+  }, [image, channelA, channelB, previewSize, view, analysis, background.a, background.b, colorA, colorB, isColoc, intensityChannels, displayBlackPoint, suppressDisplayBackground, displayBackgroundByChannel]);
 
   useEffect(() => {
     const canvas = overlayCanvas.current;
@@ -448,7 +463,9 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       ['metadata', '', 'width', image.width, 'px'], ['metadata', '', 'height', image.height, 'px'],
       ['metadata', '', 'analysis_mode', mode, ''], ['metadata', '', 'display_only_input', image.displayOnly ? 'yes' : 'no', ''], ['metadata', '', 'pixel_size', pixelSize || '', pixelSize ? 'µm/px' : 'not_set'],
       ['metadata', '', 'background_method', backgroundLabels[backgroundMethod], ''],
+      ['metadata', '', 'display_background_suppression', suppressDisplayBackground && backgroundRoi ? `background ROI mean + ${DISPLAY_BACKGROUND_SD_MULTIPLIER} SD` : 'off', ''],
     ];
+    if (suppressDisplayBackground && backgroundRoi) displayBackgroundByChannel.forEach((stats, id) => rows.push(['metadata', id, 'display_background_floor', stats.floor, 'A.U.']));
     if (analysis.coloc) {
       rows.push(['metadata', 'A', 'display_color', PSEUDOCOLORS[colorA].label, ''], ['metadata', 'B', 'display_color', PSEUDOCOLORS[colorB].label, '']);
       rows.push(['metadata', '', 'threshold_method', thresholdLabels[thresholdMethod], '']);
@@ -497,7 +514,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       channels: mode === 'colocalization'
         ? { a: { id: channelA.id, label: channelA.label, bitDepth: channelA.bitDepth }, b: { id: channelB.id, label: channelB.label, bitDepth: channelB.bitDepth } }
         : intensityChannels.map(({ channel, setting }) => ({ id: channel.id, sourceLabel: channel.label, label: setting.label || channel.label, bitDepth: channel.bitDepth, displayColor: setting.color })),
-      parameters: { roi, backgroundRoi, backgroundMethod, background: mode === 'colocalization' ? background : Object.fromEntries(intensityChannels.map(({ channel }) => [channel.id, backgroundByChannel.get(channel.id) ?? { mean: 0, sd: 0 }])), thresholdMethod, manualThresholdPercent: { a: manualA, b: manualB }, displayColors: mode === 'colocalization' ? { a: colorA, b: colorB } : Object.fromEntries(intensityChannels.map(({ channel, setting }) => [channel.id, setting.color])), displayBlackPointPercent: displayBlackPoint, scaleBar: { shown: showScaleBar, lengthUm: scaleBarUm }, scanLine, lineChannels: { a: channelA.id, b: channelB.id }, lineWidthPx: lineWidth, gaussianSigmaPx: sigma, pixelSizeUm: pixelSize || null, comparison: 'strict >', costesSignificanceTest: false },
+      parameters: { roi, backgroundRoi, backgroundMethod, background: mode === 'colocalization' ? background : Object.fromEntries(intensityChannels.map(({ channel }) => [channel.id, backgroundByChannel.get(channel.id) ?? { mean: 0, sd: 0 }])), thresholdMethod, manualThresholdPercent: { a: manualA, b: manualB }, displayColors: mode === 'colocalization' ? { a: colorA, b: colorB } : Object.fromEntries(intensityChannels.map(({ channel, setting }) => [channel.id, setting.color])), displayBlackPointPercent: displayBlackPoint, displayBackgroundSuppression: { enabled: Boolean(suppressDisplayBackground && backgroundRoi), method: `background_roi_mean_plus_${DISPLAY_BACKGROUND_SD_MULTIPLIER}sd`, channels: Object.fromEntries(displayBackgroundByChannel) }, scaleBar: { shown: showScaleBar, lengthUm: scaleBarUm }, scanLine, lineChannels: { a: channelA.id, b: channelB.id }, lineWidthPx: lineWidth, gaussianSigmaPx: sigma, pixelSizeUm: pixelSize || null, comparison: 'strict >', costesSignificanceTest: false },
       results: mode === 'colocalization' ? { colocalization: analysis.coloc } : { intensities: analysis.intensities, lineProfile: analysis.profile },
       warnings: [...image.warnings, ...(image.displayOnly ? ['本结果由展示图风险确认后生成，仅供探索。'] : []), ...(analysis.coloc?.warnings ?? []), ...(mode === 'colocalization' ? ['共定位不等于分子相互作用。'] : [])],
     };
@@ -511,8 +528,8 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     try {
       setError('');
       const channels = isColoc
-        ? [{ id: channelA.id, color: PSEUDOCOLORS[colorA].rgb }, { id: channelB.id, color: PSEUDOCOLORS[colorB].rgb }]
-        : intensityChannels.map(({ channel, setting }) => ({ id: channel.id, color: PSEUDOCOLORS[setting.color].rgb }));
+        ? [{ id: channelA.id, color: PSEUDOCOLORS[colorA].rgb, displayFloor: suppressDisplayBackground ? displayBackgroundByChannel.get(channelA.id)?.floor : undefined }, { id: channelB.id, color: PSEUDOCOLORS[colorB].rgb, displayFloor: suppressDisplayBackground ? displayBackgroundByChannel.get(channelB.id)?.floor : undefined }]
+        : intensityChannels.map(({ channel, setting }) => ({ id: channel.id, color: PSEUDOCOLORS[setting.color].rgb, displayFloor: suppressDisplayBackground ? displayBackgroundByChannel.get(channel.id)?.floor : undefined }));
       const rendered = renderRoiPseudocolor({
         image,
         channels,
@@ -534,6 +551,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   const roiText = roi ? `${Math.round(roi.width)} × ${Math.round(roi.height)} px${pixelSize ? ` / ${format(roi.width * pixelSize, 2)} × ${format(roi.height * pixelSize, 2)} µm` : ''}` : '全图';
   const lineLength = scanLine ? Math.hypot(scanLine.x2 - scanLine.x1, scanLine.y2 - scanLine.y1) : 0;
   const allWarnings = [...(image?.warnings ?? []), ...(analysis?.coloc?.warnings ?? [])];
+  const visibleWarnings = allWarnings.filter(warning => !warning.startsWith('已在浏览器本地直接读取 OIR') && !warning.startsWith('仅支持同目录不存在同名') && !warning.startsWith('当前直接读取模式已针对'));
   const intensityRows = intensityChannels.map(({ channel, setting }) => ({ channel, setting, stats: analysis?.intensities.find(result => result.id === channel.id)?.stats ?? null }));
   const primaryIntensity = analysis?.intensities[0]?.stats ?? null;
   const primaryIntensityLabel = intensityChannels[0]?.setting.label || intensityChannels[0]?.channel.label || '首个通道';
@@ -546,9 +564,8 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
         <span className="privacy-badge"><i /> 本地分析 · 无需登录</span>
       </header>
 
-      <section className="intro">
-        <div><p className="eyebrow">{isColoc ? 'COLOCALIZATION' : 'INTENSITY & LINE SCAN'}</p><h1>{isColoc ? '两个通道，回答一个共现问题。' : '从伪彩到等尺寸正方形裁图。'}</h1><p className="lede">{isColoc ? '直接读取 Olympus FV3000 OIR、OME-TIFF 或分通道 TIFF，任选两个通道并独立输出共定位指标、散点图与 Mask。' : '直接读取 OIR 或 TIFF，按奥林巴斯通道设置伪彩与显示背景，再框选固定边长的正方形 ROI；可逐通道定量并导出带比例尺的裁切图。'}</p></div>
-        <div className="workflow" aria-label="分析流程">{isColoc ? <><span className={image ? '' : 'active'}>01 上传</span><i /><span className={image && !analysis ? 'active' : ''}>02 选区</span><i /><span className={analysis ? 'active' : ''}>03 分析</span><i /><span>04 导出</span></> : <><span className={image ? '' : 'active'}>01 导入</span><i /><span className={image && !roi ? 'active' : ''}>02 伪彩/背景</span><i /><span className={roi ? 'active' : ''}>03 正方形裁剪</span><i /><span>04 导出</span></>}</div>
+      <section className="intro analyzer-intro">
+        <div><p className="eyebrow">{isColoc ? 'COLOCALIZATION' : 'INTENSITY'}</p><h1>{isColoc ? '荧光共定位分析' : '荧光强度分析'}</h1></div>
       </section>
 
       <section className="workspace" id="workspace" aria-label={isColoc ? '荧光共定位工作台' : '荧光强度工作台'}>
@@ -562,29 +579,33 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
 
           {isColoc ? <>
             <div className="field-group"><p>02 · 共定位通道</p><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[colorA].css }} />通道 A<select value={channelAId} onChange={event => setChannelAId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{channel.label}</option>)}</select></label><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[colorB].css }} />通道 B<select value={channelBId} onChange={event => setChannelBId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{channel.label}</option>)}</select></label></div>
-            <div className="field-group"><p>显示伪彩</p><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[colorA].css }} />通道 A<select value={colorA} onChange={event => setColorA(event.target.value as Pseudocolor)}>{Object.entries(PSEUDOCOLORS).map(([value, color]) => <option key={value} value={value}>{color.label}</option>)}</select></label><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[colorB].css }} />通道 B<select value={colorB} onChange={event => setColorB(event.target.value as Pseudocolor)}>{Object.entries(PSEUDOCOLORS).map(([value, color]) => <option key={value} value={value}>{color.label}</option>)}</select></label><small className="field-help">只改变预览颜色，不改变原始像素和分析结果。</small></div>
+            <div className="field-group"><p>显示伪彩</p><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[colorA].css }} />通道 A<select value={colorA} onChange={event => setColorA(event.target.value as Pseudocolor)}>{Object.entries(PSEUDOCOLORS).map(([value, color]) => <option key={value} value={value}>{color.label}</option>)}</select></label><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[colorB].css }} />通道 B<select value={colorB} onChange={event => setColorB(event.target.value as Pseudocolor)}>{Object.entries(PSEUDOCOLORS).map(([value, color]) => <option key={value} value={value}>{color.label}</option>)}</select></label><small className="field-help">仅改显示，不改数据。</small></div>
           </> : <>
-            <div className="field-group channel-manager"><p>02 · 通道与奥林巴斯伪彩</p>{intensitySettings.map(setting => <div className="channel-setting-row" key={setting.id}><label className="channel-check" title={setting.enabled ? '取消该通道' : '选择该通道'}><input type="checkbox" checked={setting.enabled} disabled={!setting.enabled && enabledIntensityIds.length >= 8} onChange={event => { updateIntensitySetting(setting.id, { enabled: event.target.checked }); if (!event.target.checked && view === `channel:${setting.id}`) setView('overlay'); }} /><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[setting.color].css }} /></label><input aria-label={`${setting.label} 自定义名称`} value={setting.label} onChange={event => updateIntensitySetting(setting.id, { label: event.target.value })} /><select aria-label={`${setting.label} 伪彩`} value={setting.color} onChange={event => updateIntensitySetting(setting.id, { color: event.target.value as Pseudocolor })}>{Object.entries(PSEUDOCOLORS).map(([value, color]) => <option key={value} value={value}>{color.label}</option>)}</select></div>)}{image && <small className="field-help">默认按 DAPI / 488 / 555(561) / 647 匹配蓝、绿、红、洋红；TD 透射光默认不勾选。可改名称、颜色和选择状态，最多 8 通道。</small>}</div>
-            <div className="field-group"><p>03 · 调整显示背景</p><label className="range-field"><span>黑场 {displayBlackPoint}%</span><input type="range" min="0" max="60" value={displayBlackPoint} onChange={event => setDisplayBlackPoint(Number(event.target.value))} /></label><small className="field-help">仅压低预览与导出图的暗背景，不改强度计算、CSV 或 JSON。</small></div>
+            <div className="field-group channel-manager"><p>02 · 通道与伪彩</p>{intensitySettings.map(setting => <div className="channel-setting-row" key={setting.id}><label className="channel-check" title={setting.enabled ? '取消该通道' : '选择该通道'}><input type="checkbox" checked={setting.enabled} disabled={!setting.enabled && enabledIntensityIds.length >= 8} onChange={event => { updateIntensitySetting(setting.id, { enabled: event.target.checked }); if (!event.target.checked && view === `channel:${setting.id}`) setView('overlay'); }} /><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[setting.color].css }} /></label><input aria-label={`${setting.label} 自定义名称`} value={setting.label} onChange={event => updateIntensitySetting(setting.id, { label: event.target.value })} /><select aria-label={`${setting.label} 伪彩`} value={setting.color} onChange={event => updateIntensitySetting(setting.id, { color: event.target.value as Pseudocolor })}>{Object.entries(PSEUDOCOLORS).map(([value, color]) => <option key={value} value={value}>{color.label}</option>)}</select></div>)}{image && <small className="field-help">自动匹配 DAPI / 488 / 555 / 647；最多 8 通道。</small>}</div>
+          </>}
+
+          <div className="field-group"><p>{isColoc ? '显示去杂色' : '03 · 去除背景杂色'}</p><label className="scale-toggle"><input type="checkbox" checked={suppressDisplayBackground} disabled={!image || !backgroundRoi} onChange={event => setSuppressDisplayBackground(event.target.checked)} /><span>背景 ROI 均值 + {DISPLAY_BACKGROUND_SD_MULTIPLIER} SD</span></label><label className="range-field"><span>黑场 {displayBlackPoint}%</span><input type="range" min="0" max="60" value={displayBlackPoint} disabled={!image} onChange={event => setDisplayBlackPoint(Number(event.target.value))} /></label><small className="field-help">{backgroundRoi ? '勾选后仅改变显示和图片导出。' : '先用图下方“背景 ROI”框选无信号暗区。'}</small></div>
+
+          {!isColoc && <>
             <div className="field-group"><p>04 · 正方形裁剪与标尺</p>{roi ? <label className="number-field"><span>边长</span><input type="number" min="1" max={image ? Math.min(image.width, image.height) : undefined} value={Math.round(roi.width)} onChange={event => setSquareRoiSide(Number(event.target.value))} /><span>px</span></label> : <small className="field-help">点击图下方“正方形裁剪”，再在图中拖拽框选。</small>}{roi && pixelSize > 0 && <small className="field-help">实际边长：{format(roi.width * pixelSize, 2)} µm；导出保持 {Math.round(roi.width)} × {Math.round(roi.height)} px。</small>}<label className="number-field"><span>像素尺寸</span><input type="number" min="0" step="0.001" value={pixelSize} onChange={event => setPixelSize(Math.max(0, Number(event.target.value) || 0))} /><span>µm/px</span></label><label className="scale-toggle"><input type="checkbox" checked={showScaleBar} onChange={event => setShowScaleBar(event.target.checked)} /><span>导出显示比例尺</span></label>{showScaleBar && <label className="number-field"><span>比例尺</span><input type="number" min="0.1" step="0.1" value={scaleBarUm} onChange={event => setScaleBarUm(Math.max(.1, Number(event.target.value) || .1))} /><span>µm</span></label>}</div>
-            <div className="field-group"><p>线扫描通道（可选）</p><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorA].css }} />通道 A<select value={channelAId} onChange={event => setChannelAId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{intensitySettings.find(setting => setting.id === channel.id)?.label || channel.label}</option>)}</select></label><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorB].css }} />通道 B<select value={channelBId} onChange={event => setChannelBId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{intensitySettings.find(setting => setting.id === channel.id)?.label || channel.label}</option>)}</select></label><small className="field-help">强度指标可选 1–8 个通道；线扫描单独比较这里的两个通道。</small></div>
+            <div className="field-group"><p>线扫描通道（可选）</p><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorA].css }} />通道 A<select value={channelAId} onChange={event => setChannelAId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{intensitySettings.find(setting => setting.id === channel.id)?.label || channel.label}</option>)}</select></label><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorB].css }} />通道 B<select value={channelBId} onChange={event => setChannelBId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{intensitySettings.find(setting => setting.id === channel.id)?.label || channel.label}</option>)}</select></label></div>
           </>}
 
           {isColoc && <div className="field-group"><p>阈值</p><label className="wide-field">方法<select value={thresholdMethod} onChange={event => setThresholdMethod(event.target.value as ThresholdMethod)}><option value="costes">Costes 自动</option><option value="otsu">Otsu 自动</option><option value="manual">手动阈值</option><option value="none">零阈值</option></select></label>{thresholdMethod === 'manual' && <div className="range-pair"><label>A {manualA}%<input type="range" min="0" max="100" value={manualA} onChange={event => setManualA(Number(event.target.value))} /></label><label>B {manualB}%<input type="range" min="0" max="100" value={manualB} onChange={event => setManualB(Number(event.target.value))} /></label></div>}</div>}
 
-          <div className="field-group"><p>{isColoc ? '背景与标尺' : '定量扣背景'}</p><label className="wide-field">方法<select value={backgroundMethod} onChange={event => setBackgroundMethod(event.target.value as BackgroundMethod)}><option value="none">不校正</option><option value="roi">背景 ROI 均值</option><option value="percentile">ROI 第 5 百分位</option></select></label>{isColoc && <><label className="number-field"><span>像素尺寸</span><input type="number" min="0" step="0.001" value={pixelSize} onChange={event => setPixelSize(Math.max(0, Number(event.target.value) || 0))} /><span>µm/px</span></label><label className="scale-toggle"><input type="checkbox" checked={showScaleBar} onChange={event => setShowScaleBar(event.target.checked)} /><span>ROI 导出显示比例尺</span></label>{showScaleBar && <label className="number-field"><span>比例尺</span><input type="number" min="0.1" step="0.1" value={scaleBarUm} onChange={event => setScaleBarUm(Math.max(.1, Number(event.target.value) || .1))} /><span>µm</span></label>}</>}<small className="field-help">{isColoc ? '背景只用于计算；比例尺写入导出的 ROI 图片。' : '这一步会用于强度数值校正，与上面的显示黑场分开。'}</small></div>
+          <div className="field-group"><p>{isColoc ? '背景与标尺' : '定量扣背景'}</p><label className="wide-field">方法<select value={backgroundMethod} onChange={event => setBackgroundMethod(event.target.value as BackgroundMethod)}><option value="none">不校正</option><option value="roi">背景 ROI 均值</option><option value="percentile">ROI 第 5 百分位</option></select></label>{isColoc && <><label className="number-field"><span>像素尺寸</span><input type="number" min="0" step="0.001" value={pixelSize} onChange={event => setPixelSize(Math.max(0, Number(event.target.value) || 0))} /><span>µm/px</span></label><label className="scale-toggle"><input type="checkbox" checked={showScaleBar} onChange={event => setShowScaleBar(event.target.checked)} /><span>导出比例尺</span></label>{showScaleBar && <label className="number-field"><span>比例尺</span><input type="number" min="0.1" step="0.1" value={scaleBarUm} onChange={event => setScaleBarUm(Math.max(.1, Number(event.target.value) || .1))} /><span>µm</span></label>}</>}<small className="field-help">{isColoc ? '背景用于计算，标尺用于导图。' : '用于数值计算，与显示去杂色分开。'}</small></div>
           {image?.displayOnly && <label className="risk-confirm"><input type="checkbox" checked={allowDisplayOnly} onChange={event => setAllowDisplayOnly(event.target.checked)} /><span><b>当前是展示图</b>仅在理解伪彩/合并 RGB 风险后进行探索性分析。</span></label>}
         </aside>
 
         <div className="image-stage">
-          <div className="stage-toolbar"><div className="view-switch"><button className={view === 'overlay' ? 'selected' : ''} onClick={() => setView('overlay')}>叠加</button>{isColoc ? <><button className={view === 'a' ? 'selected' : ''} onClick={() => setView('a')}>通道 A</button><button className={view === 'b' ? 'selected' : ''} onClick={() => setView('b')}>通道 B</button><button className={view === 'mask' ? 'selected' : ''} onClick={() => setView('mask')} disabled={!analysis?.coloc}>共定位 Mask</button></> : intensityChannels.map(({ channel, setting }) => <button key={channel.id} className={view === `channel:${channel.id}` ? 'selected' : ''} onClick={() => setView(`channel:${channel.id}`)}><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[setting.color].css }} />{setting.label || channel.label}</button>)}</div><span>ImageJ / Olympus 原始范围 · 黑场仅影响展示 · 计算用原始值</span></div>
+          <div className="stage-toolbar"><div className="view-switch"><button className={view === 'overlay' ? 'selected' : ''} onClick={() => setView('overlay')}>叠加</button>{isColoc ? <><button className={view === 'a' ? 'selected' : ''} onClick={() => setView('a')}>通道 A</button><button className={view === 'b' ? 'selected' : ''} onClick={() => setView('b')}>通道 B</button><button className={view === 'mask' ? 'selected' : ''} onClick={() => setView('mask')} disabled={!analysis?.coloc}>Mask</button></> : intensityChannels.map(({ channel, setting }) => <button key={channel.id} className={view === `channel:${channel.id}` ? 'selected' : ''} onClick={() => setView(`channel:${channel.id}`)}><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[setting.color].css }} />{setting.label || channel.label}</button>)}</div><span>显示设置不影响定量</span></div>
           <div className={`canvas-area tool-${tool}`}>
             {!image && <div className="empty-canvas"><div className="scan-grid" /><span className="crosshair" aria-hidden="true" /><p>等待图像</p><small>可直接选择 FV3000 .oir 原始文件</small></div>}
-            {image && <div className="canvas-stack" style={{ aspectRatio: `${image.width}/${image.height}`, maxWidth: `${Math.min(previewSize.width, 600 * image.width / image.height)}px` }}><canvas ref={imageCanvas} /><canvas ref={overlayCanvas} aria-label={`在图像上绘制${tool === 'roi' ? '分析 ROI' : tool === 'background' ? '背景 ROI' : '线扫描'}`} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={() => { setDragStart(null); setDraft(null); }} /></div>}
+            {image && <div className="canvas-stack" style={{ aspectRatio: `${image.width}/${image.height}`, maxWidth: `${Math.min(previewSize.width, MAX_PREVIEW_HEIGHT * image.width / image.height)}px` }}><canvas ref={imageCanvas} /><canvas ref={overlayCanvas} aria-label={`在图像上绘制${tool === 'roi' ? '分析 ROI' : tool === 'background' ? '背景 ROI' : '线扫描'}`} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={() => { setDragStart(null); setDraft(null); }} /></div>}
           </div>
-          <div className="stage-tools" aria-label="绘图工具"><button className={tool === 'roi' ? 'selected' : ''} onClick={() => setTool('roi')}><b>□</b>{isColoc ? '分析 ROI' : '正方形裁剪'}</button><button className={tool === 'background' ? 'selected' : ''} onClick={() => setTool('background')}><b>▧</b>背景 ROI</button>{!isColoc && <button className={tool === 'line' ? 'selected' : ''} onClick={() => setTool('line')}><b>╱</b>线扫描</button>}<span className="tool-spacer" /><button onClick={() => setRoi(null)}>使用全图</button><button onClick={() => { setRoi(null); setBackgroundRoi(null); setScanLine(null); }}>清除标注</button></div>
+          <div className="stage-tools" aria-label="绘图工具"><button className={tool === 'roi' ? 'selected' : ''} onClick={() => setTool('roi')}><b>□</b>{isColoc ? '分析 ROI' : '正方形裁剪'}</button><button className={tool === 'background' ? 'selected' : ''} onClick={() => setTool('background')}><b>▧</b>背景 ROI</button>{!isColoc && <button className={tool === 'line' ? 'selected' : ''} onClick={() => setTool('line')}><b>╱</b>线扫描</button>}<span className="tool-spacer" /><button onClick={() => setRoi(null)}>使用全图</button><button onClick={() => { setRoi(null); setBackgroundRoi(null); setScanLine(null); setSuppressDisplayBackground(false); }}>清除标注</button></div>
           <div className="stage-foot"><span>{isColoc ? 'ROI' : '正方形裁剪区'}：{roiText}</span>{!isColoc && <span>线长：{scanLine ? `${format(lineLength, 1)} px${pixelSize ? ` / ${format(lineLength * pixelSize, 2)} µm` : ''}` : '—'}</span>}<span>{isColoc ? `BG A/B：${format(background.a, 2)} / ${format(background.b, 2)}` : `定量背景：${backgroundLabels[backgroundMethod]}`}</span></div>
-          <div className="roi-export-panel"><div><strong>{roi ? isColoc ? `ROI ${Math.round(roi.width)} × ${Math.round(roi.height)} px` : `裁剪边长 ${Math.round(roi.width)} px${pixelSize ? ` · ${format(roi.width * pixelSize, 2)} µm` : ''}` : `先在图中框选${isColoc ? '分析 ROI' : '正方形'}`}</strong><small>导出当前通道、伪彩、显示背景和比例尺；TIFF 为 8-bit RGB 伪彩图，定量请用 CSV/JSON。</small></div><div className="export-actions"><button disabled={!roi} onClick={() => { void exportRoiImage('png'); }}>导出 ROI PNG</button><button disabled={!roi} onClick={() => { void exportRoiImage('jpg'); }}>导出 ROI JPG</button><button disabled={!roi} onClick={() => { void exportRoiImage('tiff'); }}>导出 ROI TIFF</button></div></div>
+          <div className="roi-export-panel"><div><strong>{roi ? isColoc ? `ROI ${Math.round(roi.width)} × ${Math.round(roi.height)} px` : `裁剪边长 ${Math.round(roi.width)} px${pixelSize ? ` · ${format(roi.width * pixelSize, 2)} µm` : ''}` : `先框选${isColoc ? '分析 ROI' : '正方形'}`}</strong><small>图片为伪彩；定量用 CSV / JSON。</small></div><div className="export-actions"><button disabled={!roi} onClick={() => { void exportRoiImage('png'); }}>PNG</button><button disabled={!roi} onClick={() => { void exportRoiImage('jpg'); }}>JPG</button><button disabled={!roi} onClick={() => { void exportRoiImage('tiff'); }}>TIFF</button></div></div>
         </div>
 
         <aside className="results-panel">
@@ -600,12 +621,12 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
           </>}
           {error && <p className="error-message" role="alert">{error}</p>}
           <button className="analyze-button" onClick={runAnalysis} disabled={!image || busy || loading || Boolean(image?.displayOnly && !allowDisplayOnly)}>{busy ? '正在计算…' : image ? `运行${isColoc ? '共定位' : '强度'}分析` : '载入图像后分析'} <span>→</span></button>
-          <p className="run-note">{isColoc ? `${thresholdLabels[thresholdMethod]} · ` : ''}{backgroundLabels[backgroundMethod]}<br />所有积和以浮点数计算，避免高位深溢出。</p>
+          <p className="run-note">{isColoc ? `${thresholdLabels[thresholdMethod]} · ` : ''}{backgroundLabels[backgroundMethod]}</p>
         </aside>
       </section>
 
       <section className="detail-section" id="results">
-        <div className="section-title"><div><p className="eyebrow">RESULTS</p><h2>{isColoc ? '共定位结果与质控' : '强度结果与线扫描'}</h2></div>{analysis && <div className="export-actions"><button onClick={exportRows}>导出指标 CSV</button><button onClick={exportJson}>导出完整 JSON</button>{analysis.profile && <button onClick={exportProfile}>导出线扫 CSV</button>}</div>}</div>
+        <div className="section-title"><h2>{isColoc ? '共定位结果' : '强度结果'}</h2>{analysis && <div className="export-actions"><button onClick={exportRows}>指标 CSV</button><button onClick={exportJson}>完整 JSON</button>{analysis.profile && <button onClick={exportProfile}>线扫 CSV</button>}</div>}</div>
 
         {isColoc && <div className="result-grid">
           <article className="result-card scatter-card"><header><div><span>共定位散点图</span><small>黄线：阈值 · 洋红线：Costes 回归</small></div><b>{analysis?.coloc ? thresholdLabels[thresholdMethod] : '等待分析'}</b></header><canvas ref={scatterCanvas} aria-label="通道 A 与 B 的强度散点图" /><div className="legend"><span><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[colorA].css }} />X：通道 A</span><span><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[colorB].css }} />Y：通道 B</span></div></article>
@@ -618,14 +639,11 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
         </>}
 
         <div className="qa-grid">
-          <article className="qa-card"><span>输入质控</span>{image ? <ul><li>{image.sourceFiles.join('；')}</li><li>SHA-256：{image.hash.slice(0, 12)}…</li><li>{image.width} × {image.height} px · {image.format}</li><li>通道位深：{image.channels.map(channel => `${channel.label} ${channel.bitDepth}-bit`).join('；')}</li>{pixelSize > 0 && <li>像素标定：{pixelSize} µm/px</li>}</ul> : <p>载入图像后显示来源、位深与标尺。</p>}</article>
-          <article className="qa-card warning"><span>结果警示</span><ul>{allWarnings.length ? allWarnings.map((warning, index) => <li key={`${warning}-${index}`}>{warning}</li>) : <li>运行分析后显示自动质控提示。</li>}{isColoc && <li>共定位表示光学分辨率下的共现/相关，不能证明分子相互作用。</li>}<li>跨样本比较需保持曝光、增益、激光功率、探测器设置与位深一致。</li></ul></article>
+          <article className="qa-card"><span>输入</span>{image ? <p>{image.fileName} · {image.width} × {image.height} px · {image.channels.length} 通道 · {image.channels.map(channel => `${channel.bitDepth}-bit`).join(' / ')}{pixelSize > 0 ? ` · ${pixelSize} µm/px` : ''}</p> : <p>尚未载入图像。</p>}</article>
+          <article className="qa-card warning"><span>提示</span><ul>{visibleWarnings.map((warning, index) => <li key={`${warning}-${index}`}>{warning}</li>)}{isColoc && <li>共定位不能证明分子相互作用。</li>}<li>跨样本比较须保持采集参数一致。</li></ul></article>
         </div>
       </section>
-
-      <section className="methods" id="methods"><div><p className="eyebrow">METHODS & SCOPE</p><h2>明确边界，结果才可复核。</h2></div>{isColoc ? <div className="method-list"><article><b>01</b><span><strong>输入</strong><p>直接读取 FV3000 OIR、二维 OME-TIFF，或同尺寸、已配准的分通道灰度 TIFF；可从最多 12 个通道中选择 A/B。</p></span></article><article><b>02</b><span><strong>相关与共现</strong><p>Pearson 报告强度相关；Manders 报告信号共现，两者分开解释。</p></span></article><article><b>03</b><span><strong>阈值</strong><p>Costes 自动阈值采用正交回归与阈值下 Pearson 二分搜索，不包含随机化显著性检验。</p></span></article><article><b>04</b><span><strong>边界</strong><p>Z-stack OIR 使用逐通道 MIP 并写入质控；不做对象分割、配准、时间序列或分子相互作用推断。</p></span></article></div> : <div className="method-list"><article><b>01</b><span><strong>强度</strong><p>Mean、sample SD、RawIntDen 与 ImageJ 常用定义一致；CTCF = RawIntDen − 像素数 × 背景均值，负值保留。</p></span></article><article><b>02</b><span><strong>背景</strong><p>可使用独立背景 ROI 或分析 ROI 第 5 百分位；导出文件保存所用方法与数值。</p></span></article><article><b>03</b><span><strong>线扫描</strong><p>每 1 px 双线性采样，指定线宽内求 mean ± SD；平滑只生成派生曲线。</p></span></article><article><b>04</b><span><strong>边界</strong><p>Z-stack OIR 使用逐通道 MIP 并写入质控；网页不做分割、配准、批次校正或生物学重复统计。</p></span></article></div>}<p className="source-note">OIR 在浏览器本地读取；像素布局参考 BSD-3-Clause oirfile，并已用 Bio-Formats 对 51 个 FV3000 文件逐通道核对。分析方法参考 Fiji Coloc 2、ImageJ Analyze / Plot Profile 与 Costes、Manders 定义。</p></section>
-
-      <footer><span>FluoroScope · browser-local fluorescence analysis</span><span className="footer-links"><a href="../">工具首页</a><a href="https://github.com/weigenwu/IFA" target="_blank" rel="noreferrer">GitHub ↗</a></span></footer>
+      <footer><span>FluoroScope</span><span className="footer-links"><a href="../">首页</a><a href="https://github.com/weigenwu/IFA" target="_blank" rel="noreferrer">GitHub ↗</a></span></footer>
     </main>
   );
 }

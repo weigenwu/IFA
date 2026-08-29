@@ -64,6 +64,20 @@ test('single-channel view and black point affect pseudocolor pixels only', () =>
   assert.equal(ordinary.rgb[pixelEight + 2], 0);
 });
 
+test('display background floor suppresses weak pixels without mutating source data', () => {
+  const values = [0, 2, 4, 6, 8, 10, 12, 14, 16];
+  const source = image(3, 3, [channel('a', values)]);
+  const before = Array.from(source.channels[0].data);
+  const rendered = renderRoiPseudocolor({
+    image: source,
+    channels: [{ id: 'a', color: 'green', displayFloor: 10 }],
+  });
+  assert.deepEqual(Array.from(rendered.rgb.slice(4 * 3, 4 * 3 + 3)), [0, 0, 0]);
+  assert.deepEqual(Array.from(rendered.rgb.slice(5 * 3, 5 * 3 + 3)), [0, 0, 0]);
+  assert.ok(rendered.rgb[7 * 3 + 1] > 0);
+  assert.deepEqual(Array.from(source.channels[0].data), before);
+});
+
 test('Olympus base pseudocolors use pure additive channel LUTs', () => {
   const source = image(4, 4, [channel('signal', Array.from({ length: 16 }, (_, index) => index))]);
   const expected = {
