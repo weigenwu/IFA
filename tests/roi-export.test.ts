@@ -60,8 +60,32 @@ test('single-channel view and black point affect pseudocolor pixels only', () =>
   });
   const pixelEight = 8 * 3;
   assert.ok(ordinary.rgb[pixelEight] > blackRaised.rgb[pixelEight]);
-  assert.equal(ordinary.rgb[pixelEight + 1], Math.round(ordinary.rgb[pixelEight] * 0.3));
-  assert.equal(ordinary.rgb[pixelEight + 2], Math.round(ordinary.rgb[pixelEight] * 0.4));
+  assert.equal(ordinary.rgb[pixelEight + 1], 0);
+  assert.equal(ordinary.rgb[pixelEight + 2], 0);
+});
+
+test('Olympus base pseudocolors use pure additive channel LUTs', () => {
+  const source = image(4, 4, [channel('signal', Array.from({ length: 16 }, (_, index) => index))]);
+  const expected = {
+    blue: [0, 0, 1],
+    green: [0, 1, 0],
+    red: [1, 0, 0],
+    cyan: [0, 1, 1],
+    magenta: [1, 0, 1],
+    yellow: [1, 1, 0],
+    gray: [1, 1, 1],
+  } as const;
+  for (const [color, components] of Object.entries(expected)) {
+    const rendered = renderRoiPseudocolor({
+      image: source,
+      channels: [{ id: 'signal', color: color as keyof typeof expected }],
+      view: 'overlay',
+    });
+    const rgb = Array.from(rendered.rgb.slice(8 * 3, 8 * 3 + 3));
+    const signal = Math.max(...rgb);
+    assert.ok(signal > 0, `${color} should contain signal`);
+    assert.deepEqual(rgb, components.map(component => component * signal), `${color} must not mix unintended RGB components`);
+  }
 });
 
 test('optional scale bar is drawn at its requested pixel length with a label', () => {

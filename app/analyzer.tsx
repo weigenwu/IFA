@@ -40,15 +40,15 @@ interface IntensityChannelSetting {
 
 const COLORS = { ink: '#10222a', cyan: '#18c4c7', magenta: '#f1538a', grid: '#35535b' };
 const PSEUDOCOLORS: Record<Pseudocolor, { label: string; css: string; rgb: [number, number, number] }> = {
-  green: { label: '绿色', css: '#32d17d', rgb: [0.2, 0.82, 0.49] },
-  red: { label: '红色', css: '#ff4d67', rgb: [1, 0.3, 0.4] },
-  blue: { label: '蓝色', css: '#4f83ff', rgb: [0.31, 0.51, 1] },
-  cyan: { label: '青色', css: '#18c4c7', rgb: [0.09, 0.77, 0.78] },
-  magenta: { label: '洋红', css: '#f153b7', rgb: [0.95, 0.33, 0.72] },
-  yellow: { label: '黄色', css: '#f2cc45', rgb: [0.95, 0.8, 0.27] },
+  green: { label: '绿色', css: '#00ff00', rgb: [0, 1, 0] },
+  red: { label: '红色', css: '#ff0000', rgb: [1, 0, 0] },
+  blue: { label: '蓝色', css: '#0000ff', rgb: [0, 0, 1] },
+  cyan: { label: '青色', css: '#00ffff', rgb: [0, 1, 1] },
+  magenta: { label: '洋红', css: '#ff00ff', rgb: [1, 0, 1] },
+  yellow: { label: '黄色', css: '#ffff00', rgb: [1, 1, 0] },
   orange: { label: '橙色', css: '#ff9338', rgb: [1, 0.52, 0.12] },
   violet: { label: '紫色', css: '#9b6dff', rgb: [0.61, 0.43, 1] },
-  gray: { label: '白色 / 灰度', css: '#eef4f5', rgb: [1, 1, 1] },
+  gray: { label: '白色 / 灰度', css: '#ffffff', rgb: [1, 1, 1] },
 };
 const thresholdLabels: Record<ThresholdMethod, string> = { costes: 'Costes 自动', otsu: 'Otsu 自动', manual: '手动阈值', none: '零阈值' };
 const backgroundLabels: Record<BackgroundMethod, string> = { none: '未校正', roi: '背景 ROI 均值', percentile: '分析 ROI 第 5 百分位' };
@@ -232,8 +232,8 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       ? [{ channel: channelA, color: colorA, key: 'a' }, { channel: channelB, color: colorB, key: 'b' }]
       : intensityChannels.map(({ channel, setting }) => ({ channel, color: setting.color, key: `channel:${channel.id}` }));
     const stretches = displayChannels.map(item => {
-      const baseLow = percentileInRoi(item.channel, image.width, image.height, null, 0.01);
-      const high = percentileInRoi(item.channel, image.width, image.height, null, 0.995);
+      const baseLow = percentileInRoi(item.channel, image.width, image.height, null, 0);
+      const high = percentileInRoi(item.channel, image.width, image.height, null, 1);
       const low = baseLow + Math.max(0, high - baseLow) * displayBlackPoint / 100;
       return { ...item, low, range: Math.max(1e-12, high - low), rgb: PSEUDOCOLORS[item.color].rgb };
     });
@@ -350,10 +350,14 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
 
   const pointFromEvent = (event: React.PointerEvent<HTMLCanvasElement>) => {
     const box = event.currentTarget.getBoundingClientRect();
-    return image ? {
-      x: Math.min(image.width, Math.max(0, (event.clientX - box.left) / box.width * image.width)),
-      y: Math.min(image.height, Math.max(0, (event.clientY - box.top) / box.height * image.height)),
-    } : { x: 0, y: 0 };
+    if (!image || box.width <= 0 || box.height <= 0) return { x: 0, y: 0 };
+    const scale = Math.min(box.width / image.width, box.height / image.height);
+    const contentWidth = image.width * scale, contentHeight = image.height * scale;
+    const offsetX = (box.width - contentWidth) / 2, offsetY = (box.height - contentHeight) / 2;
+    return {
+      x: Math.min(image.width, Math.max(0, (event.clientX - box.left - offsetX) / scale)),
+      y: Math.min(image.height, Math.max(0, (event.clientY - box.top - offsetY) / scale)),
+    };
   };
 
   const makeDraft = (start: { x: number; y: number }, end: { x: number; y: number }) => {
@@ -573,10 +577,10 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
         </aside>
 
         <div className="image-stage">
-          <div className="stage-toolbar"><div className="view-switch"><button className={view === 'overlay' ? 'selected' : ''} onClick={() => setView('overlay')}>叠加</button>{isColoc ? <><button className={view === 'a' ? 'selected' : ''} onClick={() => setView('a')}>通道 A</button><button className={view === 'b' ? 'selected' : ''} onClick={() => setView('b')}>通道 B</button><button className={view === 'mask' ? 'selected' : ''} onClick={() => setView('mask')} disabled={!analysis?.coloc}>共定位 Mask</button></> : intensityChannels.map(({ channel, setting }) => <button key={channel.id} className={view === `channel:${channel.id}` ? 'selected' : ''} onClick={() => setView(`channel:${channel.id}`)}><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[setting.color].css }} />{setting.label || channel.label}</button>)}</div><span>显示自动拉伸 · 黑场仅影响展示 · 计算用原始值</span></div>
+          <div className="stage-toolbar"><div className="view-switch"><button className={view === 'overlay' ? 'selected' : ''} onClick={() => setView('overlay')}>叠加</button>{isColoc ? <><button className={view === 'a' ? 'selected' : ''} onClick={() => setView('a')}>通道 A</button><button className={view === 'b' ? 'selected' : ''} onClick={() => setView('b')}>通道 B</button><button className={view === 'mask' ? 'selected' : ''} onClick={() => setView('mask')} disabled={!analysis?.coloc}>共定位 Mask</button></> : intensityChannels.map(({ channel, setting }) => <button key={channel.id} className={view === `channel:${channel.id}` ? 'selected' : ''} onClick={() => setView(`channel:${channel.id}`)}><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[setting.color].css }} />{setting.label || channel.label}</button>)}</div><span>ImageJ / Olympus 原始范围 · 黑场仅影响展示 · 计算用原始值</span></div>
           <div className={`canvas-area tool-${tool}`}>
             {!image && <div className="empty-canvas"><div className="scan-grid" /><span className="crosshair" aria-hidden="true" /><p>等待图像</p><small>可直接选择 FV3000 .oir 原始文件</small></div>}
-            {image && <div className="canvas-stack" style={{ aspectRatio: `${image.width}/${image.height}` }}><canvas ref={imageCanvas} /><canvas ref={overlayCanvas} aria-label={`在图像上绘制${tool === 'roi' ? '分析 ROI' : tool === 'background' ? '背景 ROI' : '线扫描'}`} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={() => { setDragStart(null); setDraft(null); }} /></div>}
+            {image && <div className="canvas-stack" style={{ aspectRatio: `${image.width}/${image.height}`, maxWidth: `${Math.min(previewSize.width, 600 * image.width / image.height)}px` }}><canvas ref={imageCanvas} /><canvas ref={overlayCanvas} aria-label={`在图像上绘制${tool === 'roi' ? '分析 ROI' : tool === 'background' ? '背景 ROI' : '线扫描'}`} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={() => { setDragStart(null); setDraft(null); }} /></div>}
           </div>
           <div className="stage-tools" aria-label="绘图工具"><button className={tool === 'roi' ? 'selected' : ''} onClick={() => setTool('roi')}><b>□</b>{isColoc ? '分析 ROI' : '正方形裁剪'}</button><button className={tool === 'background' ? 'selected' : ''} onClick={() => setTool('background')}><b>▧</b>背景 ROI</button>{!isColoc && <button className={tool === 'line' ? 'selected' : ''} onClick={() => setTool('line')}><b>╱</b>线扫描</button>}<span className="tool-spacer" /><button onClick={() => setRoi(null)}>使用全图</button><button onClick={() => { setRoi(null); setBackgroundRoi(null); setScanLine(null); }}>清除标注</button></div>
           <div className="stage-foot"><span>{isColoc ? 'ROI' : '正方形裁剪区'}：{roiText}</span>{!isColoc && <span>线长：{scanLine ? `${format(lineLength, 1)} px${pixelSize ? ` / ${format(lineLength * pixelSize, 2)} µm` : ''}` : '—'}</span>}<span>{isColoc ? `BG A/B：${format(background.a, 2)} / ${format(background.b, 2)}` : `定量背景：${backgroundLabels[backgroundMethod]}`}</span></div>

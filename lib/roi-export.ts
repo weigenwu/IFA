@@ -28,7 +28,7 @@ export interface RenderRoiOptions {
   roi?: Rect | null;
   view?: RoiExportView;
   /**
-   * Raises the display black point within the 1st-to-99.5th-percentile stretch.
+   * Raises the display black point within the observed minimum-to-maximum range.
    * This changes only the exported pseudocolor rendering, never source pixels.
    */
   blackPointPercent?: number;
@@ -59,13 +59,13 @@ export interface RenderedRoi {
 export const ROI_TIFF_DESCRIPTION = 'FluoroScope ROI export; 8-bit RGB pseudocolor rendering; not raw quantitative fluorescence data.';
 
 const PSEUDOCOLOR_RGB: Record<PseudocolorName, NormalizedRgb> = {
-  green: [0.2, 0.82, 0.49],
-  red: [1, 0.3, 0.4],
-  blue: [0.31, 0.51, 1],
-  cyan: [0.09, 0.77, 0.78],
-  magenta: [0.95, 0.33, 0.72],
-  yellow: [0.95, 0.8, 0.27],
-  gray: [0.86, 0.9, 0.91],
+  green: [0, 1, 0],
+  red: [1, 0, 0],
+  blue: [0, 0, 1],
+  cyan: [0, 1, 1],
+  magenta: [1, 0, 1],
+  yellow: [1, 1, 0],
+  gray: [1, 1, 1],
 };
 
 const clamp = (value: number, low: number, high: number) => Math.min(high, Math.max(low, value));
@@ -200,8 +200,8 @@ export function renderRoiPseudocolor(options: RenderRoiOptions): RenderedRoi {
     const channel = image.channels.find(candidate => candidate.id === setting.id);
     if (!channel) throw new Error(`找不到要导出的通道：${setting.id}`);
     if (channel.data.length < image.width * image.height) throw new Error(`通道 ${channel.label} 的像素数量不足。`);
-    const baseLow = percentileInRoi(channel, image.width, image.height, null, 0.01);
-    const high = percentileInRoi(channel, image.width, image.height, null, 0.995);
+    const baseLow = percentileInRoi(channel, image.width, image.height, null, 0);
+    const high = percentileInRoi(channel, image.width, image.height, null, 1);
     const low = baseLow + Math.max(0, high - baseLow) * blackPointPercent / 100;
     return { channel, rgb: colorRgb(setting.color), low, range: Math.max(1e-12, high - low) };
   });

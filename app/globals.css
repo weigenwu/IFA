@@ -90,8 +90,8 @@ select,input[type="number"] { min-width:0; height:30px; border:1px solid var(--l
 .scan-grid { position:absolute; inset:0; opacity:.13; background-image:linear-gradient(#78b7b8 1px,transparent 1px),linear-gradient(90deg,#78b7b8 1px,transparent 1px); background-size:32px 32px; mask-image:radial-gradient(circle,#000 10%,transparent 72%); }
 .crosshair { width:72px; height:72px; position:relative; border:1px solid #3e5c63; border-radius:50%; }.crosshair:before,.crosshair:after{content:"";position:absolute;background:#4c6b72}.crosshair:before{width:1px;height:92px;left:35px;top:-11px}.crosshair:after{height:1px;width:92px;left:-11px;top:35px}
 .empty-canvas p { margin:17px 0 5px; font-size:12px; font-weight:700; }.empty-canvas small { color:#71868b; font-size:9px; }
-.canvas-stack { width:100%; max-height:600px; position:relative; display:grid; place-items:center; }
-.canvas-stack canvas { position:absolute; inset:0; width:100%; height:100%; object-fit:contain; image-rendering:auto; }.canvas-stack canvas:last-child { touch-action:none; }
+.canvas-stack { width:100%; position:relative; display:grid; place-items:center; }
+.canvas-stack canvas { position:absolute; inset:0; width:100%; height:100%; image-rendering:auto; }.canvas-stack canvas:last-child { touch-action:none; }
 .tool-roi .canvas-stack canvas:last-child,.tool-background .canvas-stack canvas:last-child { cursor:crosshair; }.tool-line .canvas-stack canvas:last-child { cursor:cell; }
 .stage-tools { min-height:44px; padding:6px 11px; display:flex; align-items:center; gap:4px; flex-wrap:wrap; background:#1c363f; border-top:1px solid #28434b; }
 .stage-tools button { padding:7px 8px; border:1px solid transparent; border-radius:5px; color:#8fa6aa; background:transparent; font-size:8px; }.stage-tools button:hover,.stage-tools button.selected { color:#dff; border-color:#36545c; background:#274750; }.stage-tools b { margin-right:4px; font-size:12px; }.tool-spacer{flex:1}
