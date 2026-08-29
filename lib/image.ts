@@ -1,4 +1,5 @@
 import type { ChannelData, NumericArray } from './analysis';
+import { parseOir } from './oir.ts';
 
 export interface LoadedImage {
   fileName: string;
@@ -162,7 +163,7 @@ async function loadTiff(file: File, buffer: ArrayBuffer): Promise<LoadedImage> {
   const description = String(await first.getFileDirectory().loadValue('ImageDescription') ?? '');
   const ome = parseOmeMetadata(description);
   if (ome && (ome.sizeZ > 1 || ome.sizeT > 1)) {
-    throw new Error(`检测到 OME-TIFF Z=${ome.sizeZ}、T=${ome.sizeT}。请先在 Fiji 选择单层或生成投影，再导出二维 OME-TIFF。`);
+    throw new Error(`检测到 OME-TIFF Z=${ome.sizeZ}、T=${ome.sizeT}。当前页面仅读取二维 OME-TIFF；请上传二维投影，或直接上传原始 OIR 由网页生成 MIP。`);
   }
   const channels: ChannelData[] = [];
   const warnings: string[] = [];
@@ -215,14 +216,36 @@ async function loadTiff(file: File, buffer: ArrayBuffer): Promise<LoadedImage> {
   };
 }
 
+async function loadOir(file: File, buffer: ArrayBuffer): Promise<LoadedImage> {
+  const parsed = parseOir(buffer);
+  return {
+    fileName: file.name,
+    sourceFiles: [file.name],
+    format: parsed.projection === 'max' ? `Olympus OIR · Z=${parsed.sizeZ} MIP` : 'Olympus OIR',
+    width: parsed.width,
+    height: parsed.height,
+    channels: parsed.channels.map(channel => makeChannel(channel.id, channel.label, channel.data, parsed.bitDepth)),
+    hash: await sha256(buffer),
+    pageCount: parsed.channels.length,
+    pixelSizeUm: parsed.pixelSizeUm,
+    displayOnly: false,
+    warnings: [
+      `已在浏览器本地直接读取 OIR：${parsed.channels.length} 通道，${parsed.bitDepth}-bit；原图未上传服务器。`,
+      ...(parsed.projection === 'max' ? [`检测到 ${parsed.sizeZ} 层 Z-stack，已对每个通道生成最大强度投影（MIP）；导出结果会记录此处理。`] : []),
+      ...(parsed.discardedTrailingZ ? [`采集末尾有 ${parsed.discardedTrailingZ} 个未完成的 Z 层，已按 Bio-Formats 的完整层规则忽略。`] : []),
+      ...(parsed.declaredSizeZ !== null && parsed.declaredSizeZ > parsed.sizeZ ? [`采集元数据计划 ${parsed.declaredSizeZ} 层 Z，当前文件只有 ${parsed.sizeZ} 个完整层；这可能是中断采集，也可能缺少伴随文件。请确认同目录没有同名 _00001、_00002 等文件后再定量。此警告会写入导出结果。`] : []),
+      '仅支持同目录不存在同名 _00001、_00002 等伴随文件的单文件 OIR；元数据层数与完整层数不一致时会在质控和导出中明确警告。',
+      '当前直接读取模式已针对 Olympus FV3000 未压缩 OIR 验证；未知布局会停止分析，不会猜测像素顺序。',
+    ],
+  };
+}
+
 export async function loadImage(file: File): Promise<LoadedImage> {
   if (/\.zip$/i.test(file.name)) {
-    throw new Error('请先解压 ZIP。若其中是 Olympus OIR，请在 Fiji / Bio-Formats 中批量导出二维 OME-TIFF 或原始位深灰度 TIFF。');
-  }
-  if (/\.oir$/i.test(file.name)) {
-    throw new Error('Olympus OIR 不能由普通浏览器可靠解码。请在 Fiji 用 Bio-Formats 打开，导出 OME-TIFF 或保持原始位深的分通道灰度 TIFF 后再分析。');
+    throw new Error('请先解压 ZIP，再直接选择其中一个 .oir 文件；不需要打开 ImageJ。若同目录还有同名 _00001、_00002 等伴随文件，当前网页暂不支持这套采集。');
   }
   const buffer = await file.arrayBuffer();
+  if (/\.oir$/i.test(file.name)) return loadOir(file, buffer);
   const isTiff = /tiff?/i.test(file.type) || /\.tiff?$/i.test(file.name);
   return isTiff ? loadTiff(file, buffer) : loadStandard(file, buffer);
 }
@@ -230,8 +253,11 @@ export async function loadImage(file: File): Promise<LoadedImage> {
 export async function loadImages(files: File[]): Promise<LoadedImage> {
   if (!files.length) throw new Error('请选择图像文件。');
   if (files.length > MAX_FILES) throw new Error(`一次最多组合 ${MAX_FILES} 个分通道文件。`);
-  const oir = files.find(file => /\.oir$/i.test(file.name));
-  if (oir) return loadImage(oir);
+  const oir = files.filter(file => /\.oir$/i.test(file.name));
+  if (oir.length) {
+    if (files.length > 1) throw new Error('OIR 请一次选择一个文件；同一次采集的通道已包含在这个 OIR 内。');
+    return loadImage(oir[0]);
+  }
   const loaded = await Promise.all(files.map(loadImage));
   if (loaded.length === 1) return loaded[0];
   const { width, height } = loaded[0];

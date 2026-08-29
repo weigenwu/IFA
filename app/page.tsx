@@ -12,7 +12,7 @@ export default function Home() {
       <section className="portal-intro">
         <p className="eyebrow">IMMUNOFLUORESCENCE ANALYSIS</p>
         <h1>两个问题，<br />两套独立分析。</h1>
-        <p className="lede">共用同一套原始像素读取、ROI 与质控规则；结果和导出互不混杂。图像只在当前浏览器中处理。</p>
+        <p className="lede">直接选择 Olympus FV3000 OIR 或 TIFF；共用同一套原始像素读取、ROI 与质控规则，结果和导出互不混杂。图像只在当前浏览器中处理。</p>
       </section>
 
       <section className="tool-portal" aria-label="选择分析工具">
@@ -36,8 +36,8 @@ export default function Home() {
       </section>
 
       <section className="format-strip">
-        <div><b>推荐输入</b><span>二维 OME-TIFF · 16-bit 灰度 TIFF · 多份同尺寸分通道 TIFF</span></div>
-        <div><b>Olympus OIR</b><span>先用 Fiji / Bio-Formats 无损导出；网页会给出转换提示</span></div>
+        <div><b>推荐输入</b><span>Olympus FV3000 OIR · 二维 OME-TIFF · 16-bit 灰度 TIFF</span></div>
+        <div><b>一步打开 OIR</b><span>无需 ImageJ；二维直接读取，Z-stack 自动逐通道最大强度投影</span></div>
         <div><b>定量安全</b><span>自动识别伪彩、合并 RGB、有效位深与饱和风险</span></div>
       </section>
 

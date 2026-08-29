@@ -335,14 +335,17 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       addIntensity(channelA.label, analysis.intensityA);
       if (channelB.id !== channelA.id) addIntensity(channelB.label, analysis.intensityB);
     }
+    const warnings = [...image.warnings, ...(image.displayOnly ? ['本结果由展示图风险确认后生成，仅供探索。'] : []), ...(analysis.coloc?.warnings ?? []), ...(mode === 'colocalization' ? ['共定位不等于分子相互作用。'] : [])];
+    warnings.forEach((warning, index) => rows.push(['warning', '', `warning_${index + 1}`, warning, '']));
     saveText(`${image.fileName.replace(/\.[^.]+$/, '')}_${mode}_metrics.csv`, rows.map(row => row.map(csvCell).join(',')).join('\n'), 'text/csv;charset=utf-8');
   };
 
   const exportProfile = () => {
     if (!analysis?.profile || !image) return;
     const profile = analysis.profile;
-    const header = ['distance_px', 'distance_um', 'valid_count', 'raw_A', 'raw_B', 'background_corrected_A', 'background_corrected_B', 'smoothed_A', 'smoothed_B', 'sd_A', 'sd_B'];
-    const rows = profile.distance.map((distance, index) => [distance, pixelSize ? distance * pixelSize : '', profile.validCount[index], profile.rawA[index], profile.rawB[index], profile.correctedA[index], profile.correctedB[index], profile.smoothA[index], profile.smoothB[index], profile.sdA[index], profile.sdB[index]]);
+    const warnings = [...image.warnings, ...(image.displayOnly ? ['本结果由展示图风险确认后生成，仅供探索。'] : [])];
+    const header = ['distance_px', 'distance_um', 'valid_count', 'raw_A', 'raw_B', 'background_corrected_A', 'background_corrected_B', 'smoothed_A', 'smoothed_B', 'sd_A', 'sd_B', 'warning_count', 'warnings'];
+    const rows = profile.distance.map((distance, index) => [distance, pixelSize ? distance * pixelSize : '', profile.validCount[index], profile.rawA[index], profile.rawB[index], profile.correctedA[index], profile.correctedB[index], profile.smoothA[index], profile.smoothB[index], profile.sdA[index], profile.sdB[index], index === 0 ? warnings.length : '', index === 0 ? warnings.join(' | ') : '']);
     saveText(`${image.fileName.replace(/\.[^.]+$/, '')}_line_profile.csv`, [header, ...rows].map(row => row.map(csvCell).join(',')).join('\n'), 'text/csv;charset=utf-8');
   };
 
@@ -377,7 +380,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       </header>
 
       <section className="intro">
-        <div><p className="eyebrow">{isColoc ? 'COLOCALIZATION' : 'INTENSITY & LINE SCAN'}</p><h1>{isColoc ? '两个通道，回答一个共现问题。' : '从自定义 ROI 到强度曲线。'}</h1><p className="lede">{isColoc ? '从多通道 OME-TIFF 或多份对齐的分通道 TIFF 中任选两个通道，独立输出共定位指标、散点图与 Mask。' : '在图像上拖拽框选任意矩形区域，逐通道量化强度、背景校正、CTCF 与饱和率；伪彩可自由切换且不改变计算值。'}</p></div>
+        <div><p className="eyebrow">{isColoc ? 'COLOCALIZATION' : 'INTENSITY & LINE SCAN'}</p><h1>{isColoc ? '两个通道，回答一个共现问题。' : '从自定义 ROI 到强度曲线。'}</h1><p className="lede">{isColoc ? '直接读取 Olympus FV3000 OIR、OME-TIFF 或分通道 TIFF，任选两个通道并独立输出共定位指标、散点图与 Mask。' : '直接读取 OIR 或 TIFF，在图像上拖拽框选任意矩形区域，逐通道量化强度、背景校正、CTCF 与饱和率；伪彩可自由切换且不改变计算值。'}</p></div>
         <div className="workflow" aria-label="分析流程"><span className={image ? '' : 'active'}>01 上传</span><i /><span className={image && !analysis ? 'active' : ''}>02 选区</span><i /><span className={analysis ? 'active' : ''}>03 分析</span><i /><span>04 导出</span></div>
       </section>
 
@@ -386,7 +389,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
           <div className="panel-heading"><span>输入与参数</span><small>{isColoc ? 'COLOC' : 'INTENSITY'}</small></div>
           <div className={`dropzone ${draggingFile ? 'dragging' : ''}`} role="button" tabIndex={0} onClick={() => fileInput.current?.click()} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') fileInput.current?.click(); }} onDragOver={event => { event.preventDefault(); setDraggingFile(true); }} onDragLeave={() => setDraggingFile(false)} onDrop={event => { event.preventDefault(); setDraggingFile(false); void load(event.dataTransfer.files); }}>
             <input ref={fileInput} type="file" multiple accept="image/png,image/jpeg,image/tiff,.tif,.tiff,.ome.tif,.ome.tiff,.oir" onChange={event => { void load(event.target.files ?? undefined); event.currentTarget.value = ''; }} />
-            <span className="upload-glyph" aria-hidden="true">↑</span><strong>{loading ? '正在读取…' : image ? '更换图像' : '选择一个或多个文件'}</strong><small>OME-TIFF 或同尺寸分通道 TIFF<br />OIR 可选择并查看转换指引</small><em>{image ? `${image.sourceFiles.length} 个文件 · ${image.channels.length} 个通道` : '选择文件'}</em>
+            <span className="upload-glyph" aria-hidden="true">↑</span><strong>{loading ? '正在读取原始像素…' : image ? '更换图像' : '选择一个或多个文件'}</strong><small>Olympus FV3000 OIR 可直接打开<br />也支持 OME-TIFF 与分通道 TIFF</small><em>{image ? `${image.sourceFiles.length} 个文件 · ${image.channels.length} 个通道` : '选择文件'}</em>
           </div>
           {image && <div className="file-facts"><span>{image.format}</span><span>{image.width} × {image.height}</span><span>{image.channels.length} CH</span><span>{image.channels.map(channel => `${channel.bitDepth}-bit`).join(' / ')}</span></div>}
 
@@ -403,7 +406,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
         <div className="image-stage">
           <div className="stage-toolbar"><div className="view-switch"><button className={view === 'overlay' ? 'selected' : ''} onClick={() => setView('overlay')}>叠加</button><button className={view === 'a' ? 'selected' : ''} onClick={() => setView('a')}>通道 A</button><button className={view === 'b' ? 'selected' : ''} onClick={() => setView('b')}>通道 B</button>{isColoc && <button className={view === 'mask' ? 'selected' : ''} onClick={() => setView('mask')} disabled={!analysis?.coloc}>共定位 Mask</button>}</div><span>显示自动拉伸 · 计算用原始值</span></div>
           <div className={`canvas-area tool-${tool}`}>
-            {!image && <div className="empty-canvas"><div className="scan-grid" /><span className="crosshair" aria-hidden="true" /><p>等待图像</p><small>支持五通道二维 OME-TIFF 与多文件组合</small></div>}
+            {!image && <div className="empty-canvas"><div className="scan-grid" /><span className="crosshair" aria-hidden="true" /><p>等待图像</p><small>可直接选择 FV3000 .oir 原始文件</small></div>}
             {image && <div className="canvas-stack" style={{ aspectRatio: `${image.width}/${image.height}` }}><canvas ref={imageCanvas} /><canvas ref={overlayCanvas} aria-label={`在图像上绘制${tool === 'roi' ? '分析 ROI' : tool === 'background' ? '背景 ROI' : '线扫描'}`} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={() => { setDragStart(null); setDraft(null); }} /></div>}
           </div>
           <div className="stage-tools" aria-label="绘图工具"><button className={tool === 'roi' ? 'selected' : ''} onClick={() => setTool('roi')}><b>□</b>{isColoc ? '分析 ROI' : '自定义 ROI'}</button><button className={tool === 'background' ? 'selected' : ''} onClick={() => setTool('background')}><b>▧</b>背景 ROI</button>{!isColoc && <button className={tool === 'line' ? 'selected' : ''} onClick={() => setTool('line')}><b>╱</b>线扫描</button>}<span className="tool-spacer" /><button onClick={() => setRoi(null)}>使用全图</button><button onClick={() => { setRoi(null); setBackgroundRoi(null); setScanLine(null); }}>清除标注</button></div>
@@ -446,7 +449,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
         </div>
       </section>
 
-      <section className="methods" id="methods"><div><p className="eyebrow">METHODS & SCOPE</p><h2>明确边界，结果才可复核。</h2></div>{isColoc ? <div className="method-list"><article><b>01</b><span><strong>输入</strong><p>推荐二维 OME-TIFF，或两份及以上同尺寸、已配准的分通道灰度 TIFF；可从最多 12 个通道中选择 A/B。</p></span></article><article><b>02</b><span><strong>相关与共现</strong><p>Pearson 报告强度相关；Manders 报告信号共现，两者分开解释。</p></span></article><article><b>03</b><span><strong>阈值</strong><p>Costes 自动阈值采用正交回归与阈值下 Pearson 二分搜索，不包含随机化显著性检验。</p></span></article><article><b>04</b><span><strong>边界</strong><p>不做对象分割、配准、Z-stack、时间序列或分子相互作用推断。</p></span></article></div> : <div className="method-list"><article><b>01</b><span><strong>强度</strong><p>Mean、sample SD、RawIntDen 与 ImageJ 常用定义一致；CTCF = RawIntDen − 像素数 × 背景均值，负值保留。</p></span></article><article><b>02</b><span><strong>背景</strong><p>可使用独立背景 ROI 或分析 ROI 第 5 百分位；导出文件保存所用方法与数值。</p></span></article><article><b>03</b><span><strong>线扫描</strong><p>每 1 px 双线性采样，指定线宽内求 mean ± SD；平滑只生成派生曲线。</p></span></article><article><b>04</b><span><strong>边界</strong><p>网页不做分割、配准、批次校正或生物学重复统计。</p></span></article></div>}<p className="source-note">OIR 请先用 Fiji / Bio-Formats 导出二维 OME-TIFF 或原始位深灰度 TIFF。方法参考 Fiji Coloc 2、ImageJ Analyze / Plot Profile 与 Costes、Manders 定义。</p></section>
+      <section className="methods" id="methods"><div><p className="eyebrow">METHODS & SCOPE</p><h2>明确边界，结果才可复核。</h2></div>{isColoc ? <div className="method-list"><article><b>01</b><span><strong>输入</strong><p>直接读取 FV3000 OIR、二维 OME-TIFF，或同尺寸、已配准的分通道灰度 TIFF；可从最多 12 个通道中选择 A/B。</p></span></article><article><b>02</b><span><strong>相关与共现</strong><p>Pearson 报告强度相关；Manders 报告信号共现，两者分开解释。</p></span></article><article><b>03</b><span><strong>阈值</strong><p>Costes 自动阈值采用正交回归与阈值下 Pearson 二分搜索，不包含随机化显著性检验。</p></span></article><article><b>04</b><span><strong>边界</strong><p>Z-stack OIR 使用逐通道 MIP 并写入质控；不做对象分割、配准、时间序列或分子相互作用推断。</p></span></article></div> : <div className="method-list"><article><b>01</b><span><strong>强度</strong><p>Mean、sample SD、RawIntDen 与 ImageJ 常用定义一致；CTCF = RawIntDen − 像素数 × 背景均值，负值保留。</p></span></article><article><b>02</b><span><strong>背景</strong><p>可使用独立背景 ROI 或分析 ROI 第 5 百分位；导出文件保存所用方法与数值。</p></span></article><article><b>03</b><span><strong>线扫描</strong><p>每 1 px 双线性采样，指定线宽内求 mean ± SD；平滑只生成派生曲线。</p></span></article><article><b>04</b><span><strong>边界</strong><p>Z-stack OIR 使用逐通道 MIP 并写入质控；网页不做分割、配准、批次校正或生物学重复统计。</p></span></article></div>}<p className="source-note">OIR 在浏览器本地读取；像素布局参考 BSD-3-Clause oirfile，并已用 Bio-Formats 对 51 个 FV3000 文件逐通道核对。分析方法参考 Fiji Coloc 2、ImageJ Analyze / Plot Profile 与 Costes、Manders 定义。</p></section>
 
       <footer><span>FluoroScope · browser-local fluorescence analysis</span><span className="footer-links"><a href="/">工具首页</a><a href="https://github.com/weigenwu/IFA" target="_blank" rel="noreferrer">GitHub ↗</a></span></footer>
     </main>

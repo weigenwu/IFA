@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 import { calculateColocalization, intensityStats, lineProfile, type ChannelData } from '../lib/analysis.ts';
 import { collapsePseudocolor } from '../lib/image.ts';
+import { parseOir } from '../lib/oir.ts';
 
 const channel = (id: string, values: number[], maxValue = Math.max(...values, 1)): ChannelData => ({
   id,
@@ -15,6 +16,26 @@ const channel = (id: string, values: number[], maxValue = Math.max(...values, 1)
 const coloc = (a: number[], b: number[], thresholdPercent = 0) => calculateColocalization(
   channel('a', a), channel('b', b), a.length, 1, null, 'manual', thresholdPercent, thresholdPercent,
 );
+
+const joinBytes = (...parts: Uint8Array[]) => {
+  const output = new Uint8Array(parts.reduce((sum, part) => sum + part.length, 0));
+  let offset = 0;
+  for (const part of parts) { output.set(part, offset); offset += part.length; }
+  return output;
+};
+
+const syntheticOirBlock = (uid: string, values: number[]) => {
+  const name = new TextEncoder().encode(uid);
+  const output = new Uint8Array(28 + name.length + values.length * 2);
+  const view = new DataView(output.buffer);
+  view.setUint32(0, name.length + 12, true);
+  view.setUint32(4, 3, true);
+  view.setUint32(16, name.length, true);
+  output.set(name, 20);
+  view.setUint32(20 + name.length, values.length * 2, true);
+  values.forEach((value, index) => view.setUint16(28 + name.length + index * 2, value, true));
+  return output;
+};
 
 test('perfect correlation and overlap', () => {
   const result = coloc([0, 1, 2, 3], [0, 2, 4, 6]);
@@ -84,4 +105,38 @@ test('independent RGB signals are not collapsed', () => {
 test('12-bit saturation uses 4095 rather than Uint16 container maximum', () => {
   const raw12: ChannelData = { id: 'raw12', label: '12-bit', data: new Uint16Array([0, 4094, 4095, 4095]), maxValue: 4095, bitDepth: 12, integer: true };
   assert.equal(intensityStats(raw12, 4, 1, null).saturationPct, 50);
+});
+
+test('FV3000 OIR pixels, metadata, and Z projection are read locally', () => {
+  const text = new TextEncoder();
+  const frame = text.encode('<?xml version="1.0"?><lsmframe:frameProperties><commonframe:imageDefinition><base:width>2</base:width><base:height>2</base:height><base:bitCounts>12</base:bitCounts></commonframe:imageDefinition></lsmframe:frameProperties>');
+  const metadata = text.encode('<?xml version="1.0"?><root:metadata><commonphase:channel id="abc" order="1"><lsmimage:dyeName>DAPI</lsmimage:dyeName><commonphase:length><commonparam:x>0.25</commonparam:x></commonphase:length><commonphase:pixelUnit><commonphase:x>MICRO_METER</commonphase:x></commonphase:pixelUnit></commonphase:channel></root:metadata>');
+  const raw = joinBytes(
+    text.encode('OLYMPUSRAWFORMAT'), frame, metadata,
+    syntheticOirBlock('z001_0_1_abc_0', [1, 100, 10, 4095]),
+    syntheticOirBlock('z002_0_1_abc_0', [2, 50, 20, 4000]),
+    syntheticOirBlock('z003_0_1_abc_0', [999]),
+  );
+  const parsed = parseOir(raw.buffer as ArrayBuffer);
+  assert.equal(parsed.bitDepth, 12);
+  assert.equal(parsed.pixelSizeUm, 0.25);
+  assert.equal(parsed.sizeZ, 2);
+  assert.equal(parsed.projection, 'max');
+  assert.equal(parsed.discardedTrailingZ, 1);
+  assert.equal(parsed.channels[0].label, 'DAPI');
+  assert.deepEqual(Array.from(parsed.channels[0].data), [2, 100, 20, 4095]);
+});
+
+test('FV3000 OIR reports when metadata declares missing Z planes', () => {
+  const text = new TextEncoder();
+  const frame = text.encode('<?xml version="1.0"?><lsmframe:frameProperties><base:width>2</base:width><base:height>2</base:height><base:bitCounts>12</base:bitCounts></lsmframe:frameProperties>');
+  const metadata = text.encode('<?xml version="1.0"?><root:metadata><commonparam:axis enable="true" paramEnable="true"><commonparam:axis>ZSTACK</commonparam:axis><commonparam:maxSize>2</commonparam:maxSize></commonparam:axis></root:metadata>');
+  const raw = joinBytes(
+    text.encode('OLYMPUSRAWFORMAT'), frame, metadata,
+    syntheticOirBlock('z001_0_1_abc_0', [1, 2, 3, 4]),
+    syntheticOirBlock('z002_0_1_abc_0', [5, 6, 7, 8]),
+  );
+  const parsed = parseOir(raw.buffer as ArrayBuffer);
+  assert.equal(parsed.sizeZ, 2);
+  assert.equal(parsed.declaredSizeZ, 3);
 });
