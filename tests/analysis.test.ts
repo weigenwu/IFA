@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { calculateColocalization, displayWindow, fitSquareRoi, intensityStats, lineProfile, type ChannelData } from '../lib/analysis.ts';
+import { calculateColocalization, displayWindow, fitSquareRoi, intensityStats, lineProfile, resizeSquareFromAnchor, type ChannelData } from '../lib/analysis.ts';
 import { collapsePseudocolor } from '../lib/image.ts';
 import { parseOir } from '../lib/oir.ts';
 
@@ -78,6 +78,12 @@ test('intensity background correction keeps signed CTCF', () => {
 test('square ROI keeps its requested size when moved against image edges', () => {
   assert.deepEqual(fitSquareRoi(100, 80, 95, 75, 20), { x: 80, y: 60, width: 20, height: 20 });
   assert.deepEqual(fitSquareRoi(100, 80, -20, -10, 120), { x: 0, y: 0, width: 80, height: 80 });
+});
+
+test('square ROI corner resize keeps its opposite corner and stays inside the image', () => {
+  assert.deepEqual(resizeSquareFromAnchor(100, 80, { x: 20, y: 10 }, { x: 55, y: 60 }, 1, 1), { x: 20, y: 10, width: 50, height: 50 });
+  assert.deepEqual(resizeSquareFromAnchor(100, 80, { x: 90, y: 70 }, { x: -50, y: -50 }, -1, -1), { x: 20, y: 0, width: 70, height: 70 });
+  assert.deepEqual(resizeSquareFromAnchor(100, 80, { x: 50, y: 40 }, { x: 70, y: 60 }, -1, -1), { x: 49, y: 39, width: 1, height: 1 });
 });
 
 test('display presets preserve raw detector range and provide clipped preview windows', () => {

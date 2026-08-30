@@ -82,6 +82,15 @@ export function fitSquareRoi(width: number, height: number, x: number, y: number
   };
 }
 
+export function resizeSquareFromAnchor(width: number, height: number, anchor: { x: number; y: number }, point: { x: number; y: number }, directionX: -1 | 1, directionY: -1 | 1): Rect {
+  const availableX = directionX < 0 ? anchor.x : width - anchor.x;
+  const availableY = directionY < 0 ? anchor.y : height - anchor.y;
+  const dragX = directionX * (point.x - anchor.x);
+  const dragY = directionY * (point.y - anchor.y);
+  const side = clamp(Math.round(Math.max(1, dragX, dragY)), 1, Math.max(1, Math.min(availableX, availableY)));
+  return { x: directionX < 0 ? anchor.x - side : anchor.x, y: directionY < 0 ? anchor.y - side : anchor.y, width: side, height: side };
+}
+
 export function boundsFor(width: number, height: number, roi?: Rect | null): Bounds {
   if (!roi) return { x0: 0, y0: 0, x1: width, y1: height, pixels: width * height };
   const x0 = clamp(Math.floor(Math.min(roi.x, roi.x + roi.width)), 0, width);
