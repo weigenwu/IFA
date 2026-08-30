@@ -27,6 +27,7 @@ type BackgroundMethod = 'none' | 'roi' | 'percentile';
 type AnalysisMode = 'colocalization' | 'intensity';
 type Pseudocolor = 'green' | 'red' | 'blue' | 'cyan' | 'magenta' | 'yellow' | 'orange' | 'violet' | 'gray';
 type RoiCorner = 'nw' | 'ne' | 'sw' | 'se';
+type RoiSizeUnit = 'px' | 'um' | 'mm' | 'cm';
 
 interface RoiResizeState {
   anchor: { x: number; y: number };
@@ -69,6 +70,8 @@ const backgroundLabels: Record<BackgroundMethod, string> = { none: '未校正', 
 const FALLBACK_COLORS: Pseudocolor[] = ['blue', 'green', 'red', 'magenta', 'cyan', 'yellow', 'orange', 'violet', 'gray'];
 const MAX_PREVIEW_HEIGHT = 800;
 const DISPLAY_BACKGROUND_SD_MULTIPLIER = 2;
+const MICRONS_PER_UNIT = { um: 1, mm: 1000, cm: 10000 } as const;
+const ROI_UNIT_LABELS: Record<RoiSizeUnit, string> = { px: 'px', um: 'µm', mm: 'mm', cm: 'cm' };
 
 function isTransmittedLight(id: string, label: string) {
   const value = `${id} ${label}`.toLowerCase();
@@ -121,6 +124,25 @@ const format = (value: number, digits = 3) => {
   if (absolute >= 10000 || (absolute > 0 && absolute < 0.001)) return value.toExponential(3);
   return value.toLocaleString('zh-CN', { maximumFractionDigits: digits });
 };
+
+function roiSideInUnit(sidePx: number, pixelSizeUm: number, unit: RoiSizeUnit) {
+  if (unit === 'px') return sidePx;
+  return sidePx * pixelSizeUm / MICRONS_PER_UNIT[unit];
+}
+
+function roiUnitPrecision(pixelSizeUm: number, unit: RoiSizeUnit) {
+  if (unit === 'px' || !(pixelSizeUm > 0)) return 0;
+  const onePixel = roiSideInUnit(1, pixelSizeUm, unit);
+  const needed = Math.max(0, Math.ceil(-Math.log10(onePixel)) + 1);
+  const base = unit === 'um' ? 2 : unit === 'mm' ? 4 : 6;
+  return Math.min(8, Math.max(base, needed));
+}
+
+function roiSideLabel(sidePx: number, pixelSizeUm: number, unit: RoiSizeUnit) {
+  if (!(pixelSizeUm > 0)) return `${Math.round(sidePx)} px`;
+  if (unit === 'px') return `${Math.round(sidePx)} px · ${format(roiSideInUnit(sidePx, pixelSizeUm, 'um'), roiUnitPrecision(pixelSizeUm, 'um'))} µm`;
+  return `${format(roiSideInUnit(sidePx, pixelSizeUm, unit), roiUnitPrecision(pixelSizeUm, unit))} ${ROI_UNIT_LABELS[unit]} · ${Math.round(sidePx)} px`;
+}
 
 const csvCell = (value: string | number) => `"${String(value).replaceAll('"', '""')}"`;
 
@@ -180,7 +202,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   const [suppressDisplayBackground, setSuppressDisplayBackground] = useState(false);
   const [showScaleBar, setShowScaleBar] = useState(true);
   const [scaleBarUm, setScaleBarUm] = useState(20);
-  const [roiSizeUnit, setRoiSizeUnit] = useState<'px' | 'um'>('px');
+  const [roiSizeUnit, setRoiSizeUnit] = useState<RoiSizeUnit>('px');
   const [squareSizeLocked, setSquareSizeLocked] = useState(false);
   const [roiTargetSidePx, setRoiTargetSidePx] = useState(256);
   const [roiMoveOffset, setRoiMoveOffset] = useState<{ x: number; y: number } | null>(null);
@@ -280,7 +302,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       const loadedPixelSize = loaded.pixelSizeUm ?? 0;
       setPixelSize(loadedPixelSize); setScaleBarUm(suggestedScaleBarUm(loaded.width, loadedPixelSize));
       setDisplayBlackPoint(0); setSuppressDisplayBackground(false); setShowScaleBar(true); setAllowDisplayOnly(false);
-      setRoiSizeUnit('px'); setSquareSizeLocked(false); setRoiTargetSidePx(Math.min(256, loaded.width, loaded.height)); setRoiMoveOffset(null); setRoiResize(null);
+      setRoiSizeUnit(loadedPixelSize > 0 ? 'um' : 'px'); setSquareSizeLocked(false); setRoiTargetSidePx(Math.min(256, loaded.width, loaded.height)); setRoiMoveOffset(null); setRoiResize(null);
     } catch (problem) {
       setImage(null);
       setError(problem instanceof Error ? problem.message : '无法读取该图像。');
@@ -355,7 +377,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
         context.fillStyle = '#fff'; context.fill(); context.strokeStyle = COLORS.cyan; context.lineWidth = 2; context.stroke();
       });
     };
-    const roiLabel = !isColoc && roi ? `边长 ${Math.round(roi.width)} px${pixelSize > 0 ? ` · ${format(roi.width * pixelSize, 1)} µm` : ''}` : 'ROI';
+    const roiLabel = !isColoc && roi ? `边长 ${roiSideLabel(roi.width, pixelSize, roiSizeUnit)}` : 'ROI';
     drawRect(roi, COLORS.cyan, roiLabel); drawRect(backgroundRoi, COLORS.magenta, 'BG'); drawLine(scanLine);
     if (!isColoc && tool === 'roi' && roi && !squareSizeLocked) drawRoiHandles(roi);
     if (showScaleBar && pixelSize > 0 && scaleBarUm > 0) {
@@ -371,7 +393,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       if ('width' in draft) drawRect(draft, tool === 'background' ? COLORS.magenta : '#ffffff', tool === 'background' ? 'BG' : 'ROI');
       else drawLine(draft);
     }
-  }, [image, previewSize, roi, backgroundRoi, scanLine, draft, tool, lineWidth, showScaleBar, pixelSize, scaleBarUm, isColoc, squareSizeLocked]);
+  }, [image, previewSize, roi, backgroundRoi, scanLine, draft, tool, lineWidth, showScaleBar, pixelSize, scaleBarUm, isColoc, squareSizeLocked, roiSizeUnit]);
 
   useEffect(() => {
     const canvas = scatterCanvas.current;
@@ -574,14 +596,13 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
 
   const setSquareRoiSide = (value: number) => {
     if (!image || !Number.isFinite(value)) return;
-    const sidePx = roiSizeUnit === 'um' ? value / pixelSize : value;
+    const sidePx = roiSizeUnit === 'px' ? value : value * MICRONS_PER_UNIT[roiSizeUnit] / pixelSize;
     if (!Number.isFinite(sidePx) || sidePx <= 0) return;
-    setRoiTargetSidePx(Math.min(sidePx, image.width, image.height));
-    setRoi(current => {
-      const centerX = current ? current.x + current.width / 2 : image.width / 2;
-      const centerY = current ? current.y + current.height / 2 : image.height / 2;
-      return fitSquareRoi(image.width, image.height, centerX - sidePx / 2, centerY - sidePx / 2, sidePx);
-    });
+    const centerX = roi ? roi.x + roi.width / 2 : image.width / 2;
+    const centerY = roi ? roi.y + roi.height / 2 : image.height / 2;
+    const fitted = fitSquareRoi(image.width, image.height, centerX - sidePx / 2, centerY - sidePx / 2, sidePx);
+    setRoiTargetSidePx(fitted.width);
+    setRoi(fitted);
   };
 
   const runAnalysis = () => {
@@ -710,7 +731,11 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     } catch (problem) { setError(problem instanceof Error ? problem.message : 'ROI 图片导出失败。'); }
   };
 
-  const roiText = roi ? `${Math.round(roi.width)} × ${Math.round(roi.height)} px${pixelSize ? ` / ${format(roi.width * pixelSize, 2)} × ${format(roi.height * pixelSize, 2)} µm` : ''}` : '全图';
+  const roiText = roi
+    ? isColoc
+      ? `${Math.round(roi.width)} × ${Math.round(roi.height)} px${pixelSize ? ` / ${format(roi.width * pixelSize, 2)} × ${format(roi.height * pixelSize, 2)} µm` : ''}`
+      : `边长 ${roiSideLabel(roi.width, pixelSize, roiSizeUnit)}`
+    : '全图';
   const lineLength = scanLine ? Math.hypot(scanLine.x2 - scanLine.x1, scanLine.y2 - scanLine.y1) : 0;
   const allWarnings = [...(image?.warnings ?? []), ...(analysis?.coloc?.warnings ?? [])];
   const visibleWarnings = allWarnings.filter(warning => !warning.startsWith('已在浏览器本地直接读取 OIR') && !warning.startsWith('仅支持同目录不存在同名') && !warning.startsWith('当前直接读取模式已针对'));
@@ -718,9 +743,13 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   const primaryIntensity = analysis?.intensities[0]?.stats ?? null;
   const primaryIntensityLabel = intensityChannels[0]?.setting.label || intensityChannels[0]?.channel.label || '首个通道';
   const histogramPosition = (value: number) => histogram ? Math.min(100, Math.max(0, (value - histogram.axisMin) / Math.max(1e-12, histogram.axisMax - histogram.axisMin) * 100)) : 0;
-  const roiSideValue = roiSizeUnit === 'um'
-    ? Number(((roi?.width ?? roiTargetSidePx) * pixelSize).toFixed(2))
-    : Math.round(roi?.width ?? roiTargetSidePx);
+  const roiUnitDigits = roiUnitPrecision(pixelSize, roiSizeUnit);
+  const roiSideValue = roiSizeUnit === 'px'
+    ? Math.round(roi?.width ?? roiTargetSidePx)
+    : Number(roiSideInUnit(roi?.width ?? roiTargetSidePx, pixelSize, roiSizeUnit).toFixed(roiUnitDigits));
+  const roiSideMin = roiSizeUnit === 'px' ? 1 : roiSideInUnit(1, pixelSize, roiSizeUnit);
+  const roiSideMax = image ? roiSideInUnit(Math.min(image.width, image.height), pixelSize, roiSizeUnit) : 1;
+  const roiSideStep = roiSideMin;
 
   return (
     <main className="app-shell" id="top">
@@ -764,7 +793,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
           <div className="field-group"><p>显示去杂色</p><label className="scale-toggle"><input type="checkbox" checked={suppressDisplayBackground} disabled={!image || !backgroundRoi} onChange={event => setSuppressDisplayBackground(event.target.checked)} /><span>背景 ROI 均值 + {DISPLAY_BACKGROUND_SD_MULTIPLIER} SD</span></label><small className="field-help">{backgroundRoi ? '仅改变显示和图片导出。' : '先在图中框选背景 ROI。'}</small></div>
 
           {!isColoc && <>
-            <div className="field-group"><p>正方形裁剪与标尺</p>{image && <div className="crop-size-field"><span>边长</span><input aria-label="裁剪边长" type="number" min={roiSizeUnit === 'um' ? Math.max(pixelSize, .01) : 1} max={roiSizeUnit === 'um' ? Math.min(image.width, image.height) * pixelSize : Math.min(image.width, image.height)} step={roiSizeUnit === 'um' ? .1 : 1} value={roiSideValue} onChange={event => setSquareRoiSide(Number(event.target.value))} /><select aria-label="裁剪边长单位" value={roiSizeUnit} onChange={event => setRoiSizeUnit(event.target.value as 'px' | 'um')}><option value="px">px</option><option value="um" disabled={!pixelSize}>µm</option></select></div>}<label className="scale-toggle"><input type="checkbox" checked={squareSizeLocked} onChange={event => { setSquareSizeLocked(event.target.checked); setRoiResize(null); }} /><span>固定边长（仅移动）</span></label><small className="field-help">{squareSizeLocked ? '已固定；框内拖动可移动位置。' : '拖四角缩放，框内拖动移动；输入边长可精确设置。'}</small><label className="number-field"><span>像素尺寸</span><input type="number" min="0" step="0.001" value={pixelSize} onChange={event => { const value = Math.max(0, Number(event.target.value) || 0); setPixelSize(value); if (!value) setRoiSizeUnit('px'); }} /><span>µm/px</span></label><label className="scale-toggle"><input type="checkbox" checked={showScaleBar} onChange={event => setShowScaleBar(event.target.checked)} /><span>导出显示比例尺</span></label>{showScaleBar && <label className="number-field"><span>比例尺</span><input type="number" min="0.1" step="0.1" value={scaleBarUm} onChange={event => setScaleBarUm(Math.max(.1, Number(event.target.value) || .1))} /><span>µm</span></label>}</div>
+            <div className="field-group"><p>正方形裁剪与标尺</p>{image && <div className="crop-size-field"><span>实际边长</span><input aria-label="裁剪边长" type="number" min={roiSideMin} max={roiSideMax} step={roiSideStep} value={roiSideValue} onChange={event => setSquareRoiSide(Number(event.target.value))} /><select aria-label="裁剪边长单位" value={roiSizeUnit} onChange={event => setRoiSizeUnit(event.target.value as RoiSizeUnit)}><option value="px">px</option><option value="um" disabled={!pixelSize}>µm</option><option value="mm" disabled={!pixelSize}>mm</option><option value="cm" disabled={!pixelSize}>cm</option></select></div>}<label className="scale-toggle"><input type="checkbox" checked={squareSizeLocked} onChange={event => { setSquareSizeLocked(event.target.checked); setRoiResize(null); }} /><span>固定边长（仅移动）</span></label><small className="field-help">{squareSizeLocked ? '已固定；框内拖动可移动位置。' : '拖四角缩放，框内拖动移动；输入实际边长可精确设置。'}</small><label className="number-field"><span>像素尺寸</span><input type="number" min="0" step="0.001" value={pixelSize} onChange={event => { const value = Math.max(0, Number(event.target.value) || 0); setPixelSize(value); if (!value) setRoiSizeUnit('px'); }} /><span>µm/px</span></label><label className="scale-toggle"><input type="checkbox" checked={showScaleBar} onChange={event => setShowScaleBar(event.target.checked)} /><span>导出显示比例尺</span></label>{showScaleBar && <label className="number-field"><span>比例尺</span><input type="number" min="0.1" step="0.1" value={scaleBarUm} onChange={event => setScaleBarUm(Math.max(.1, Number(event.target.value) || .1))} /><span>µm</span></label>}</div>
             <div className="field-group"><p>线扫描通道（可选）</p><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorA].css }} />通道 A<select value={channelAId} onChange={event => setChannelAId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{channelSettings.find(setting => setting.id === channel.id)?.label || channel.label}</option>)}</select></label><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorB].css }} />通道 B<select value={channelBId} onChange={event => setChannelBId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{channelSettings.find(setting => setting.id === channel.id)?.label || channel.label}</option>)}</select></label></div>
           </>}
 
@@ -783,7 +812,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
           </div>
           <div className="stage-tools" aria-label="绘图工具"><button className={tool === 'roi' ? 'selected' : ''} onClick={() => setTool('roi')}><b>□</b>{isColoc ? '分析 ROI' : '正方形裁剪'}</button><button className={tool === 'background' ? 'selected' : ''} onClick={() => setTool('background')}><b>▧</b>背景 ROI</button>{!isColoc && <button className={tool === 'line' ? 'selected' : ''} onClick={() => setTool('line')}><b>╱</b>线扫描</button>}<span className="tool-spacer" /><button onClick={() => setRoi(null)}>使用全图</button><button onClick={() => { setRoi(null); setBackgroundRoi(null); setScanLine(null); setSuppressDisplayBackground(false); }}>清除标注</button></div>
           <div className="stage-foot"><span>{isColoc ? 'ROI' : '正方形裁剪区'}：{roiText}</span>{!isColoc && <span>线长：{scanLine ? `${format(lineLength, 1)} px${pixelSize ? ` / ${format(lineLength * pixelSize, 2)} µm` : ''}` : '—'}</span>}<span>{isColoc ? `BG A/B：${format(background.a, 2)} / ${format(background.b, 2)}` : `定量背景：${backgroundLabels[backgroundMethod]}`}</span></div>
-          <div className="roi-export-panel"><div><strong>{roi ? isColoc ? `ROI ${Math.round(roi.width)} × ${Math.round(roi.height)} px` : `裁剪边长 ${Math.round(roi.width)} px${pixelSize ? ` · ${format(roi.width * pixelSize, 2)} µm` : ''}` : `先框选${isColoc ? '分析 ROI' : '正方形'}`}</strong><small>图片为伪彩；定量用 CSV / JSON。</small></div><div className="export-actions"><button disabled={!roi || !channelConfirmed} onClick={() => { void exportRoiImage('png'); }}>PNG</button><button disabled={!roi || !channelConfirmed} onClick={() => { void exportRoiImage('jpg'); }}>JPG</button><button disabled={!roi || !channelConfirmed} onClick={() => { void exportRoiImage('tiff'); }}>TIFF</button></div></div>
+          <div className="roi-export-panel"><div><strong>{roi ? isColoc ? `ROI ${Math.round(roi.width)} × ${Math.round(roi.height)} px` : `裁剪边长 ${roiSideLabel(roi.width, pixelSize, roiSizeUnit)}` : `先框选${isColoc ? '分析 ROI' : '正方形'}`}</strong><small>图片为伪彩；定量用 CSV / JSON。</small></div><div className="export-actions"><button disabled={!roi || !channelConfirmed} onClick={() => { void exportRoiImage('png'); }}>PNG</button><button disabled={!roi || !channelConfirmed} onClick={() => { void exportRoiImage('jpg'); }}>JPG</button><button disabled={!roi || !channelConfirmed} onClick={() => { void exportRoiImage('tiff'); }}>TIFF</button></div></div>
         </div>
 
         <aside className="results-panel">
@@ -795,7 +824,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
           </> : <>
             <div className="metric hero-metric"><small>Corrected Mean · {primaryIntensityLabel}</small><strong>{primaryIntensity ? format(primaryIntensity.correctedMean, 2) : '—'}</strong><span>首个所选通道的背景校正平均强度</span></div>
             <div className="metric-row"><div className="metric"><small>CTCF</small><strong>{primaryIntensity ? format(primaryIntensity.ctcf, 1) : '—'}</strong><span>{primaryIntensityLabel}</span></div><div className="metric"><small>饱和</small><strong>{primaryIntensity ? `${format(primaryIntensity.saturationPct, 2)}%` : '—'}</strong><span>有效位深上限</span></div></div>
-            <div className="quick-stats"><span><small>ROI 像素</small><b>{primaryIntensity ? primaryIntensity.pixels.toLocaleString() : '—'}</b></span><span><small>所选通道</small><b>{enabledIntensityIds.length}</b></span><span><small>正方形边长</small><b>{roi ? `${Math.round(roi.width)} px` : '全图'}</b></span></div>
+            <div className="quick-stats"><span><small>ROI 像素</small><b>{primaryIntensity ? primaryIntensity.pixels.toLocaleString() : '—'}</b></span><span><small>所选通道</small><b>{enabledIntensityIds.length}</b></span><span><small>正方形边长</small><b>{roi ? roiSideLabel(roi.width, pixelSize, roiSizeUnit) : '全图'}</b></span></div>
           </>}
           {error && <p className="error-message" role="alert">{error}</p>}
           <button className="analyze-button" onClick={runAnalysis} disabled={!image || !channelConfirmed || busy || loading || Boolean(image?.displayOnly && !allowDisplayOnly)}>{busy ? '正在计算…' : image && !channelConfirmed ? '先确认通道' : image ? `运行${isColoc ? '共定位' : '强度'}分析` : '载入图像后分析'} <span>→</span></button>
