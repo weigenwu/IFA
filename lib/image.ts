@@ -22,6 +22,7 @@ interface OmeMetadata {
   sizeT: number;
   significantBits: number | null;
   pixelSizeUm: number | null;
+  pixelSizeWarning: string | null;
 }
 
 const MAX_CHANNELS = 12;
@@ -46,7 +47,7 @@ const channelInfo = (data: NumericArray, significantBits?: number | null) => {
   return { maxValue: Math.max(1, maxValue), bitDepth: data instanceof Float64Array ? 64 : 32, integer: false };
 };
 
-const makeChannel = (id: string, label: string, data: NumericArray, significantBits?: number | null): ChannelData => ({ id, label, data, ...channelInfo(data, significantBits) });
+const makeChannel = (id: string, label: string, data: NumericArray, significantBits?: number | null, sourceColor?: string | null): ChannelData => ({ id, label, sourceColor, data, ...channelInfo(data, significantBits) });
 
 const observedMax = (data: NumericArray) => {
   let max = Number.NEGATIVE_INFINITY;
@@ -105,13 +106,17 @@ function parseOmeMetadata(description: string): OmeMetadata | null {
     const wavelength = channel.getAttribute('ExcitationWavelength');
     return wavelength ? `${name} · ${wavelength} nm` : name;
   });
+  const pixelSizeX = microns(pixels.getAttribute('PhysicalSizeX'), pixels.getAttribute('PhysicalSizeXUnit'));
+  const pixelSizeY = microns(pixels.getAttribute('PhysicalSizeY'), pixels.getAttribute('PhysicalSizeYUnit'));
+  const anisotropic = pixelSizeX !== null && pixelSizeY !== null && Math.abs(pixelSizeX - pixelSizeY) > Math.max(pixelSizeX, pixelSizeY) * 1e-6;
   return {
     channelLabels,
     sizeC: Number(pixels.getAttribute('SizeC')) || channelLabels.length || 1,
     sizeZ: Number(pixels.getAttribute('SizeZ')) || 1,
     sizeT: Number(pixels.getAttribute('SizeT')) || 1,
     significantBits: Number(pixels.getAttribute('SignificantBits')) || null,
-    pixelSizeUm: microns(pixels.getAttribute('PhysicalSizeX'), pixels.getAttribute('PhysicalSizeXUnit')),
+    pixelSizeUm: anisotropic ? null : pixelSizeX ?? pixelSizeY,
+    pixelSizeWarning: anisotropic ? `X/Y 像素尺寸不同（${pixelSizeX} / ${pixelSizeY} µm）；已停用自动 µm 正方形与比例尺，请手动核对。` : null,
   };
 }
 
@@ -200,6 +205,7 @@ async function loadTiff(file: File, buffer: ArrayBuffer): Promise<LoadedImage> {
   if (collapsed) warnings.push('检测到单通道伪彩 RGB TIFF，已还原为一个信号通道；8-bit 文件仅建议探索性定量。');
   else if (!ome && photometric === 2) warnings.push('检测到多色 RGB TIFF，可能是合并展示图；请勿把 RGB 分量当作原始染料通道。');
   if (ome) warnings.push(`已读取 OME 元数据：${ome.sizeC} 通道，Z=${ome.sizeZ}，T=${ome.sizeT}。`);
+  if (ome?.pixelSizeWarning) warnings.push(ome.pixelSizeWarning);
   if (finalChannels.some(channel => channel.bitDepth > 8)) warnings.push('分析使用 TIFF 原始位深；显示预览单独缩放，不改变数值。');
   return {
     fileName: file.name,
@@ -224,7 +230,7 @@ async function loadOir(file: File, buffer: ArrayBuffer): Promise<LoadedImage> {
     format: parsed.projection === 'max' ? `Olympus OIR · Z=${parsed.sizeZ} MIP` : 'Olympus OIR',
     width: parsed.width,
     height: parsed.height,
-    channels: parsed.channels.map(channel => makeChannel(channel.id, channel.label, channel.data, parsed.bitDepth)),
+    channels: parsed.channels.map(channel => makeChannel(channel.id, channel.label, channel.data, parsed.bitDepth, channel.lut)),
     hash: await sha256(buffer),
     pageCount: parsed.channels.length,
     pixelSizeUm: parsed.pixelSizeUm,
@@ -234,6 +240,7 @@ async function loadOir(file: File, buffer: ArrayBuffer): Promise<LoadedImage> {
       ...(parsed.projection === 'max' ? [`检测到 ${parsed.sizeZ} 层 Z-stack，已对每个通道生成最大强度投影（MIP）；导出结果会记录此处理。`] : []),
       ...(parsed.discardedTrailingZ ? [`采集末尾有 ${parsed.discardedTrailingZ} 个未完成的 Z 层，已按 Bio-Formats 的完整层规则忽略。`] : []),
       ...(parsed.declaredSizeZ !== null && parsed.declaredSizeZ > parsed.sizeZ ? [`采集元数据计划 ${parsed.declaredSizeZ} 层 Z，当前文件只有 ${parsed.sizeZ} 个完整层；这可能是中断采集，也可能缺少伴随文件。请确认同目录没有同名 _00001、_00002 等文件后再定量。此警告会写入导出结果。`] : []),
+      ...(parsed.pixelSizeWarning ? [parsed.pixelSizeWarning] : []),
       '仅支持同目录不存在同名 _00001、_00002 等伴随文件的单文件 OIR；元数据层数与完整层数不一致时会在质控和导出中明确警告。',
       '当前直接读取模式已针对 Olympus FV3000 未压缩 OIR 验证；未知布局会停止分析，不会猜测像素顺序。',
     ],

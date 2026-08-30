@@ -6,6 +6,7 @@ export type NumericArray =
 export interface ChannelData {
   id: string;
   label: string;
+  sourceColor?: string | null;
   data: NumericArray;
   maxValue: number;
   bitDepth: number;
@@ -14,6 +15,7 @@ export interface ChannelData {
 
 export interface Rect { x: number; y: number; width: number; height: number }
 export interface Line { x1: number; y1: number; x2: number; y2: number }
+export type DisplayPreset = 'raw' | 'auto' | 'imagej';
 
 export interface IntensityStats {
   pixels: number;
@@ -70,6 +72,16 @@ interface Moments { n: number; a: number; b: number; aa: number; bb: number; ab:
 
 const clamp = (value: number, low: number, high: number) => Math.min(high, Math.max(low, value));
 
+export function fitSquareRoi(width: number, height: number, x: number, y: number, side: number): Rect {
+  const fittedSide = clamp(Math.round(side), 1, Math.max(1, Math.min(width, height)));
+  return {
+    x: clamp(Math.round(x), 0, Math.max(0, width - fittedSide)),
+    y: clamp(Math.round(y), 0, Math.max(0, height - fittedSide)),
+    width: fittedSide,
+    height: fittedSide,
+  };
+}
+
 export function boundsFor(width: number, height: number, roi?: Rect | null): Bounds {
   if (!roi) return { x0: 0, y0: 0, x1: width, y1: height, pixels: width * height };
   const x0 = clamp(Math.floor(Math.min(roi.x, roi.x + roi.width)), 0, width);
@@ -93,13 +105,12 @@ export function meanInRoi(channel: ChannelData, width: number, height: number, r
 export function percentileInRoi(channel: ChannelData, width: number, height: number, roi: Rect | null | undefined, percentile: number): number {
   const b = boundsFor(width, height, roi);
   if (!b.pixels) return Number.NaN;
-  const bins = channel.integer && channel.maxValue <= 65535
-    ? Math.max(2, Math.floor(channel.maxValue) + 1)
-    : 4096;
+  const exactIntegerBins = channel.integer && channel.maxValue <= 65535;
+  const bins = exactIntegerBins ? Math.max(2, Math.floor(channel.maxValue) + 1) : 4096;
   const hist = new Uint32Array(bins);
   let min = Number.POSITIVE_INFINITY;
   let max = Number.NEGATIVE_INFINITY;
-  if (bins === 4096) {
+  if (!exactIntegerBins) {
     for (let y = b.y0; y < b.y1; y++) {
       const row = y * width;
       for (let x = b.x0; x < b.x1; x++) {
@@ -125,6 +136,19 @@ export function percentileInRoi(channel: ChannelData, width: number, height: num
     if (seen > target) return min + i / scale;
   }
   return max;
+}
+
+export function displayWindow(channel: ChannelData, width: number, height: number, preset: DisplayPreset) {
+  const observedMin = percentileInRoi(channel, width, height, null, 0);
+  const observedMax = percentileInRoi(channel, width, height, null, 1);
+  if (preset === 'raw') {
+    return { min: channel.integer ? 0 : observedMin, max: channel.integer ? channel.maxValue : observedMax };
+  }
+  // ImageJ Enhance Contrast commonly uses 0.35% total saturation; "auto" is a stronger 1% preview stretch.
+  const tail = preset === 'imagej' ? 0.00175 : 0.005;
+  const min = percentileInRoi(channel, width, height, null, tail);
+  const max = percentileInRoi(channel, width, height, null, 1 - tail);
+  return max > min ? { min, max } : { min: observedMin, max: observedMax > observedMin ? observedMax : observedMin + 1 };
 }
 
 export function intensityStats(channel: ChannelData, width: number, height: number, roi: Rect | null | undefined, backgroundMean = 0, backgroundSd = 0): IntensityStats {

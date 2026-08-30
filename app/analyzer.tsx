@@ -3,18 +3,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   calculateColocalization,
+  displayWindow,
+  fitSquareRoi,
   intensityStats,
   lineProfile,
   percentileInRoi,
   scatterSample,
   type ColocResult,
+  type DisplayPreset,
   type IntensityStats,
   type Line,
   type LineProfile,
   type Rect,
 } from '../lib/analysis';
 import { loadImages, type LoadedImage } from '../lib/image';
-import { encodePseudocolorTiff, renderRoiPseudocolor, renderedRoiToBlob } from '../lib/roi-export';
+import { encodePseudocolorTiff, renderRoiPseudocolor, renderedRoiToBlob, resolveDisplayRange } from '../lib/roi-export';
 
 type Tool = 'roi' | 'background' | 'line';
 type View = 'overlay' | 'a' | 'b' | 'mask' | `channel:${string}`;
@@ -31,11 +34,14 @@ interface AnalysisState {
   createdAt: string;
 }
 
-interface IntensityChannelSetting {
+interface ChannelSetting {
   id: string;
   enabled: boolean;
   label: string;
   color: Pseudocolor;
+  displayMin: number;
+  displayMax: number;
+  displayPreset: DisplayPreset | 'manual';
 }
 
 const COLORS = { ink: '#10222a', cyan: '#18c4c7', magenta: '#f1538a', grid: '#35535b' };
@@ -61,7 +67,17 @@ function isTransmittedLight(id: string, label: string) {
   return /(^|[\s_./-])(td\d*|transmitted|transmission|bright[\s_-]*field|bf|dic|phase)(?=$|[\s_./-])|透射|明场/.test(value);
 }
 
-function suggestedColor(id: string, label: string, index: number): Pseudocolor {
+function suggestedColor(id: string, label: string, sourceColor: string | null | undefined, index: number): Pseudocolor {
+  const lut = sourceColor?.toLowerCase() ?? '';
+  if (/magenta/.test(lut)) return 'magenta';
+  if (/violet|purple/.test(lut)) return 'violet';
+  if (/orange/.test(lut)) return 'orange';
+  if (/yellow/.test(lut)) return 'yellow';
+  if (/cyan/.test(lut)) return 'cyan';
+  if (/blue/.test(lut)) return 'blue';
+  if (/green/.test(lut)) return 'green';
+  if (/red/.test(lut)) return 'red';
+  if (/gr[ae]y|white/.test(lut)) return 'gray';
   const value = `${id} ${label}`.toLowerCase();
   if (isTransmittedLight(id, label)) return 'gray';
   if (/dapi|hoechst|405|核/.test(value)) return 'blue';
@@ -74,12 +90,13 @@ function suggestedColor(id: string, label: string, index: number): Pseudocolor {
   return FALLBACK_COLORS[index % FALLBACK_COLORS.length];
 }
 
-function initialIntensitySettings(image: LoadedImage): IntensityChannelSetting[] {
+function initialChannelSettings(image: LoadedImage): ChannelSetting[] {
   let enabledCount = 0;
   return image.channels.map((channel, index) => {
     const enabled = !isTransmittedLight(channel.id, channel.label) && enabledCount < 8;
     if (enabled) enabledCount++;
-    return { id: channel.id, enabled, label: channel.label, color: suggestedColor(channel.id, channel.label, index) };
+    const range = displayWindow(channel, image.width, image.height, 'imagej');
+    return { id: channel.id, enabled, label: channel.label, color: suggestedColor(channel.id, channel.label, channel.sourceColor, index), displayMin: range.min, displayMax: range.max, displayPreset: 'imagej' };
   });
 }
 
@@ -148,32 +165,58 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   const [error, setError] = useState('');
   const [draggingFile, setDraggingFile] = useState(false);
   const [allowDisplayOnly, setAllowDisplayOnly] = useState(false);
-  const [colorA, setColorA] = useState<Pseudocolor>('green');
-  const [colorB, setColorB] = useState<Pseudocolor>('red');
-  const [intensitySettings, setIntensitySettings] = useState<IntensityChannelSetting[]>([]);
+  const [channelSettings, setChannelSettings] = useState<ChannelSetting[]>([]);
+  const [channelConfirmed, setChannelConfirmed] = useState(false);
+  const [displayChannelId, setDisplayChannelId] = useState('');
   const [displayBlackPoint, setDisplayBlackPoint] = useState(0);
   const [suppressDisplayBackground, setSuppressDisplayBackground] = useState(false);
   const [showScaleBar, setShowScaleBar] = useState(true);
   const [scaleBarUm, setScaleBarUm] = useState(20);
+  const [roiSizeUnit, setRoiSizeUnit] = useState<'px' | 'um'>('px');
+  const [squareSizeLocked, setSquareSizeLocked] = useState(true);
+  const [roiTargetSidePx, setRoiTargetSidePx] = useState(256);
+  const [roiMoveOffset, setRoiMoveOffset] = useState<{ x: number; y: number } | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const imageCanvas = useRef<HTMLCanvasElement>(null);
   const overlayCanvas = useRef<HTMLCanvasElement>(null);
   const scatterCanvas = useRef<HTMLCanvasElement>(null);
   const profileCanvas = useRef<HTMLCanvasElement>(null);
 
-  const enabledIntensityIds = useMemo(() => intensitySettings.filter(setting => setting.enabled).map(setting => setting.id), [intensitySettings]);
+  const enabledIntensityIds = useMemo(() => channelSettings.filter(setting => setting.enabled).map(setting => setting.id), [channelSettings]);
   const analysisSignature = useMemo(() => JSON.stringify({ mode, channelAId, channelBId, intensityChannels: enabledIntensityIds, roi, backgroundRoi: backgroundMethod === 'roi' ? backgroundRoi : null, scanLine, thresholdMethod, manualA, manualB, backgroundMethod, lineWidth, sigma, pixelSize, allowDisplayOnly }), [mode, channelAId, channelBId, enabledIntensityIds, roi, backgroundRoi, scanLine, thresholdMethod, manualA, manualB, backgroundMethod, lineWidth, sigma, pixelSize, allowDisplayOnly]);
   const analysis = analysisState?.signature === analysisSignature ? analysisState : null;
 
   const channelA = image?.channels.find(channel => channel.id === channelAId) ?? image?.channels[0];
   const channelB = image?.channels.find(channel => channel.id === channelBId) ?? image?.channels[1] ?? image?.channels[0];
-  const intensityChannels = useMemo(() => intensitySettings.flatMap(setting => {
+  const intensityChannels = useMemo(() => channelSettings.flatMap(setting => {
     if (!setting.enabled) return [];
     const channel = image?.channels.find(candidate => candidate.id === setting.id);
     return channel ? [{ setting, channel }] : [];
-  }), [image, intensitySettings]);
-  const displayColorA = isColoc ? colorA : intensitySettings.find(setting => setting.id === channelA?.id)?.color ?? colorA;
-  const displayColorB = isColoc ? colorB : intensitySettings.find(setting => setting.id === channelB?.id)?.color ?? colorB;
+  }), [image, channelSettings]);
+  const channelASetting = channelSettings.find(setting => setting.id === channelA?.id);
+  const channelBSetting = channelSettings.find(setting => setting.id === channelB?.id);
+  const displayColorA = channelASetting?.color ?? 'green';
+  const displayColorB = channelBSetting?.color ?? 'red';
+  const channelALabel = channelASetting?.label || channelA?.label || '通道 A';
+  const channelBLabel = channelBSetting?.label || channelB?.label || '通道 B';
+  const activeDisplaySetting = channelSettings.find(setting => setting.id === displayChannelId) ?? channelSettings[0];
+  const activeDisplayChannel = image?.channels.find(channel => channel.id === activeDisplaySetting?.id);
+
+  const histogram = useMemo(() => {
+    if (!activeDisplayChannel) return null;
+    const bins = new Uint32Array(64);
+    const axisMin = activeDisplayChannel.integer ? 0 : percentileInRoi(activeDisplayChannel, image!.width, image!.height, null, 0);
+    const axisMax = activeDisplayChannel.integer ? activeDisplayChannel.maxValue : percentileInRoi(activeDisplayChannel, image!.width, image!.height, null, 1);
+    const range = Math.max(1e-12, axisMax - axisMin);
+    const step = Math.max(1, Math.ceil(activeDisplayChannel.data.length / 250000));
+    for (let index = 0; index < activeDisplayChannel.data.length; index += step) {
+      const bin = Math.min(bins.length - 1, Math.max(0, Math.floor((Number(activeDisplayChannel.data[index]) - axisMin) / range * bins.length)));
+      bins[bin]++;
+    }
+    const peak = Math.max(1, ...Array.from(bins, count => Math.log1p(count)));
+    const points = [`0,32`, ...Array.from(bins, (count, index) => `${index / (bins.length - 1) * 100},${32 - Math.log1p(count) / peak * 30}`), `100,32`].join(' ');
+    return { axisMin, axisMax, points };
+  }, [activeDisplayChannel, image]);
 
   const previewSize = useMemo(() => {
     if (!image) return { width: 900, height: 540 };
@@ -218,8 +261,8 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     try {
       const loaded = await loadImages(selected);
       setImage(loaded);
-      const settings = initialIntensitySettings(loaded);
-      setIntensitySettings(settings);
+      const settings = initialChannelSettings(loaded);
+      setChannelSettings(settings); setChannelConfirmed(false); setDisplayChannelId(settings[0]?.id ?? '');
       const fluorescence = settings.filter(setting => setting.enabled);
       const green = loaded.channels.find(channel => channel.id === 'green') ?? loaded.channels.find(channel => channel.id === fluorescence[0]?.id) ?? loaded.channels[0];
       const red = loaded.channels.find(channel => channel.id === 'red') ?? loaded.channels.find(channel => channel.id === fluorescence[1]?.id) ?? loaded.channels[1] ?? loaded.channels[0];
@@ -228,6 +271,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       const loadedPixelSize = loaded.pixelSizeUm ?? 0;
       setPixelSize(loadedPixelSize); setScaleBarUm(suggestedScaleBarUm(loaded.width, loadedPixelSize));
       setDisplayBlackPoint(0); setSuppressDisplayBackground(false); setShowScaleBar(true); setAllowDisplayOnly(false);
+      setRoiSizeUnit('px'); setSquareSizeLocked(true); setRoiTargetSidePx(Math.min(256, loaded.width, loaded.height)); setRoiMoveOffset(null);
     } catch (problem) {
       setImage(null);
       setError(problem instanceof Error ? problem.message : '无法读取该图像。');
@@ -242,15 +286,12 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     if (!context) return;
     const pixels = context.createImageData(canvas.width, canvas.height);
     const displayChannels = isColoc
-      ? [{ channel: channelA, color: colorA, key: 'a' }, { channel: channelB, color: colorB, key: 'b' }]
-      : intensityChannels.map(({ channel, setting }) => ({ channel, color: setting.color, key: `channel:${channel.id}` }));
+      ? [{ channel: channelA, setting: channelASetting, color: displayColorA, key: 'a' }, { channel: channelB, setting: channelBSetting, color: displayColorB, key: 'b' }]
+      : intensityChannels.map(({ channel, setting }) => ({ channel, setting, color: setting.color, key: `channel:${channel.id}` }));
     const stretches = displayChannels.map(item => {
-      const baseLow = percentileInRoi(item.channel, image.width, image.height, null, 0);
-      const high = percentileInRoi(item.channel, image.width, image.height, null, 1);
       const backgroundFloor = suppressDisplayBackground ? displayBackgroundByChannel.get(item.channel.id)?.floor : undefined;
-      const displayLow = Number.isFinite(backgroundFloor) ? Math.min(high, Math.max(baseLow, Number(backgroundFloor))) : baseLow;
-      const low = displayLow + Math.max(0, high - displayLow) * displayBlackPoint / 100;
-      return { ...item, low, range: Math.max(1e-12, high - low), rgb: PSEUDOCOLORS[item.color].rgb };
+      const range = resolveDisplayRange(item.channel, image.width, image.height, { displayMin: item.setting?.displayMin, displayMax: item.setting?.displayMax, displayFloor: backgroundFloor, blackPointPercent: displayBlackPoint });
+      return { ...item, ...range, rgb: PSEUDOCOLORS[item.color].rgb };
     });
     for (let y = 0; y < canvas.height; y++) {
       const sourceY = Math.min(image.height - 1, Math.floor(y / canvas.height * image.height));
@@ -270,11 +311,11 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
           const positive = analysis?.coloc && Number(channelA.data[source]) - background.a > analysis.coloc.thresholdA && Number(channelB.data[source]) - background.b > analysis.coloc.thresholdB;
           if (positive) { red = green = blue = 1; } else { red *= .18; green *= .18; blue *= .18; }
         }
-        pixels.data[target] = red * 255; pixels.data[target + 1] = green * 255; pixels.data[target + 2] = blue * 255; pixels.data[target + 3] = 255;
+        pixels.data[target] = Math.round(red * 255); pixels.data[target + 1] = Math.round(green * 255); pixels.data[target + 2] = Math.round(blue * 255); pixels.data[target + 3] = 255;
       }
     }
     context.putImageData(pixels, 0, 0);
-  }, [image, channelA, channelB, previewSize, view, analysis, background.a, background.b, colorA, colorB, isColoc, intensityChannels, displayBlackPoint, suppressDisplayBackground, displayBackgroundByChannel]);
+  }, [image, channelA, channelB, channelASetting, channelBSetting, previewSize, view, analysis, background.a, background.b, displayColorA, displayColorB, isColoc, intensityChannels, displayBlackPoint, suppressDisplayBackground, displayBackgroundByChannel]);
 
   useEffect(() => {
     const canvas = overlayCanvas.current;
@@ -377,6 +418,12 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
 
   const makeDraft = (start: { x: number; y: number }, end: { x: number; y: number }) => {
     if (tool === 'line') return { x1: start.x, y1: start.y, x2: end.x, y2: end.y } as Line;
+    if (!isColoc && tool === 'roi' && squareSizeLocked && roi && image) {
+      return fitSquareRoi(image.width, image.height, end.x - roi.width / 2, end.y - roi.height / 2, roi.width);
+    }
+    if (!isColoc && tool === 'roi' && squareSizeLocked && image) {
+      return fitSquareRoi(image.width, image.height, end.x - roiTargetSidePx / 2, end.y - roiTargetSidePx / 2, roiTargetSidePx);
+    }
     const width = end.x - start.x, height = end.y - start.y;
     if (!isColoc && tool === 'roi') {
       const side = Math.max(Math.abs(width), Math.abs(height));
@@ -388,12 +435,23 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
     if (!image) return;
     event.currentTarget.setPointerCapture(event.pointerId);
-    const point = pointFromEvent(event); setDragStart(point); setDraft(makeDraft(point, point));
+    const point = pointFromEvent(event);
+    const selected = normalizedRect(roi);
+    if (!isColoc && tool === 'roi' && squareSizeLocked && selected && point.x >= selected.x && point.x <= selected.x + selected.width && point.y >= selected.y && point.y <= selected.y + selected.height) {
+      setRoiMoveOffset({ x: point.x - selected.x, y: point.y - selected.y }); setDragStart(null); setDraft(null); return;
+    }
+    setDragStart(point); setDraft(makeDraft(point, point));
   };
   const handlePointerMove = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (roiMoveOffset && image && roi) {
+      const point = pointFromEvent(event);
+      setRoi(fitSquareRoi(image.width, image.height, point.x - roiMoveOffset.x, point.y - roiMoveOffset.y, roi.width));
+      return;
+    }
     if (!dragStart) return; setDraft(makeDraft(dragStart, pointFromEvent(event)));
   };
   const handlePointerUp = (event: React.PointerEvent<HTMLCanvasElement>) => {
+    if (roiMoveOffset) { setRoiMoveOffset(null); return; }
     if (!dragStart) return;
     const final = makeDraft(dragStart, pointFromEvent(event));
     if ('width' in final && Math.abs(final.width) > 2 && Math.abs(final.height) > 2) {
@@ -402,18 +460,17 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
         const rect = normalizedRect(final);
         if (!rect || isColoc || !image) setRoi(rect);
         else {
-          const x = Math.max(0, Math.min(image.width - 1, Math.round(rect.x)));
-          const y = Math.max(0, Math.min(image.height - 1, Math.round(rect.y)));
-          const side = Math.max(1, Math.min(image.width - x, image.height - y, Math.round(rect.width)));
-          setRoi({ x, y, width: side, height: side });
+          const fitted = fitSquareRoi(image.width, image.height, rect.x, rect.y, rect.width);
+          setRoiTargetSidePx(fitted.width);
+          setRoi(fitted);
         }
       }
     } else if (!('width' in final) && Math.hypot(final.x2 - final.x1, final.y2 - final.y1) > 2) setScanLine(final);
     setDragStart(null); setDraft(null);
   };
 
-  const updateIntensitySetting = (id: string, patch: Partial<IntensityChannelSetting>) => {
-    setIntensitySettings(current => {
+  const updateChannelSetting = (id: string, patch: Partial<ChannelSetting>) => {
+    setChannelSettings(current => {
       if (patch.enabled && !current.find(setting => setting.id === id)?.enabled && current.filter(setting => setting.enabled).length >= 8) {
         setError('强度分析一次最多选择 8 个通道。');
         return current;
@@ -421,21 +478,43 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       setError('');
       return current.map(setting => setting.id === id ? { ...setting, ...patch } : setting);
     });
+    if ('enabled' in patch || 'label' in patch || 'color' in patch) setChannelConfirmed(false);
+  };
+
+  const setChannelDisplayPreset = (id: string, preset: DisplayPreset) => {
+    if (!image) return;
+    const channel = image.channels.find(candidate => candidate.id === id);
+    if (!channel) return;
+    const range = displayWindow(channel, image.width, image.height, preset);
+    updateChannelSetting(id, { displayMin: range.min, displayMax: range.max, displayPreset: preset });
+  };
+
+  const setManualDisplayValue = (id: string, key: 'displayMin' | 'displayMax', value: number) => {
+    if (!Number.isFinite(value)) return;
+    const setting = channelSettings.find(candidate => candidate.id === id);
+    if (!setting || (key === 'displayMin' ? value >= setting.displayMax : value <= setting.displayMin)) {
+      setError('显示范围需要 Min 小于 Max。');
+      return;
+    }
+    setError('');
+    updateChannelSetting(id, { [key]: value, displayPreset: 'manual' });
   };
 
   const setSquareRoiSide = (value: number) => {
-    if (!image || !roi || !Number.isFinite(value)) return;
+    if (!image || !Number.isFinite(value)) return;
+    const sidePx = roiSizeUnit === 'um' ? value / pixelSize : value;
+    if (!Number.isFinite(sidePx) || sidePx <= 0) return;
+    setRoiTargetSidePx(Math.min(sidePx, image.width, image.height));
     setRoi(current => {
-      if (!current) return current;
-      const x = Math.max(0, Math.min(image.width - 1, Math.round(current.x)));
-      const y = Math.max(0, Math.min(image.height - 1, Math.round(current.y)));
-      const side = Math.max(1, Math.min(image.width - x, image.height - y, Math.round(value)));
-      return { x, y, width: side, height: side };
+      const centerX = current ? current.x + current.width / 2 : image.width / 2;
+      const centerY = current ? current.y + current.height / 2 : image.height / 2;
+      return fitSquareRoi(image.width, image.height, centerX - sidePx / 2, centerY - sidePx / 2, sidePx);
     });
   };
 
   const runAnalysis = () => {
     if (!image || !channelA || !channelB) return;
+    if (!channelConfirmed) { setError('请先确认通道名称和伪彩。'); return; }
     if (image.displayOnly && !allowDisplayOnly) { setError('当前输入是伪彩、RGB 合并图或浏览器解码图。严谨定量请改用原始 OME-TIFF/灰度 TIFF；如只做探索，请先勾选风险确认。'); return; }
     if (mode === 'colocalization' && channelA.id === channelB.id) { setError('共定位必须选择两个不同的原始通道。'); return; }
     if (mode === 'intensity' && !intensityChannels.length) { setError('请至少勾选 1 个强度分析通道。'); return; }
@@ -456,6 +535,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   };
 
   const exportRows = () => {
+    if (!channelConfirmed) { setError('请先确认通道名称和伪彩。'); return; }
     if (!analysis || !image || !channelA || !channelB) return;
     const rows: (string | number)[][] = [
       ['section', 'channel', 'metric', 'value', 'unit'],
@@ -463,11 +543,17 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       ['metadata', '', 'width', image.width, 'px'], ['metadata', '', 'height', image.height, 'px'],
       ['metadata', '', 'analysis_mode', mode, ''], ['metadata', '', 'display_only_input', image.displayOnly ? 'yes' : 'no', ''], ['metadata', '', 'pixel_size', pixelSize || '', pixelSize ? 'µm/px' : 'not_set'],
       ['metadata', '', 'background_method', backgroundLabels[backgroundMethod], ''],
+      ['metadata', '', 'display_black_point', displayBlackPoint, '%'],
       ['metadata', '', 'display_background_suppression', suppressDisplayBackground && backgroundRoi ? `background ROI mean + ${DISPLAY_BACKGROUND_SD_MULTIPLIER} SD` : 'off', ''],
     ];
     if (suppressDisplayBackground && backgroundRoi) displayBackgroundByChannel.forEach((stats, id) => rows.push(['metadata', id, 'display_background_floor', stats.floor, 'A.U.']));
     if (analysis.coloc) {
-      rows.push(['metadata', 'A', 'display_color', PSEUDOCOLORS[colorA].label, ''], ['metadata', 'B', 'display_color', PSEUDOCOLORS[colorB].label, '']);
+      rows.push(
+        ['metadata', 'A', 'channel_id', channelA.id, ''], ['metadata', 'A', 'source_label', channelA.label, ''], ['metadata', 'A', 'source_color', channelA.sourceColor ?? '', ''], ['metadata', 'A', 'display_label', channelALabel, ''], ['metadata', 'A', 'display_color', PSEUDOCOLORS[displayColorA].label, ''],
+        ['metadata', 'B', 'channel_id', channelB.id, ''], ['metadata', 'B', 'source_label', channelB.label, ''], ['metadata', 'B', 'source_color', channelB.sourceColor ?? '', ''], ['metadata', 'B', 'display_label', channelBLabel, ''], ['metadata', 'B', 'display_color', PSEUDOCOLORS[displayColorB].label, ''],
+      );
+      if (channelASetting) rows.push(['metadata', 'A', 'display_min', channelASetting.displayMin, 'A.U.'], ['metadata', 'A', 'display_max', channelASetting.displayMax, 'A.U.'], ['metadata', 'A', 'display_preset', channelASetting.displayPreset, '']);
+      if (channelBSetting) rows.push(['metadata', 'B', 'display_min', channelBSetting.displayMin, 'A.U.'], ['metadata', 'B', 'display_max', channelBSetting.displayMax, 'A.U.'], ['metadata', 'B', 'display_preset', channelBSetting.displayPreset, '']);
       rows.push(['metadata', '', 'threshold_method', thresholdLabels[thresholdMethod], '']);
       const entries: [string, number, string][] = [
         ['pearson_r', analysis.coloc.pearson, ''], ['pearson_below', analysis.coloc.pearsonBelow, ''], ['pearson_above', analysis.coloc.pearsonAbove, ''],
@@ -483,11 +569,12 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
         Object.entries(stats).forEach(([metric, value]) => rows.push(['intensity', label, metric, value, metric.includes('Pct') ? '%' : metric === 'pixels' ? 'px' : 'A.U.']));
       };
       analysis.intensities.forEach(result => {
-        const setting = intensitySettings.find(candidate => candidate.id === result.id);
+        const setting = channelSettings.find(candidate => candidate.id === result.id);
         const channel = image.channels.find(candidate => candidate.id === result.id);
         if (setting && channel) {
           const label = setting.label || channel.label;
-          rows.push(['metadata', label, 'channel_id', channel.id, ''], ['metadata', label, 'source_label', channel.label, '']);
+          rows.push(['metadata', label, 'channel_id', channel.id, ''], ['metadata', label, 'source_label', channel.label, ''], ['metadata', label, 'source_color', channel.sourceColor ?? '', '']);
+          rows.push(['metadata', label, 'display_min', setting.displayMin, 'A.U.'], ['metadata', label, 'display_max', setting.displayMax, 'A.U.'], ['metadata', label, 'display_preset', setting.displayPreset, '']);
           addIntensity(label, setting.color, result.stats);
         }
       });
@@ -498,23 +585,25 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   };
 
   const exportProfile = () => {
-    if (!analysis?.profile || !image) return;
+    if (!channelConfirmed) { setError('请先确认通道名称和伪彩。'); return; }
+    if (!analysis?.profile || !image || !channelA || !channelB) return;
     const profile = analysis.profile;
     const warnings = [...image.warnings, ...(image.displayOnly ? ['本结果由展示图风险确认后生成，仅供探索。'] : [])];
-    const header = ['distance_px', 'distance_um', 'valid_count', 'raw_A', 'raw_B', 'background_corrected_A', 'background_corrected_B', 'smoothed_A', 'smoothed_B', 'sd_A', 'sd_B', 'warning_count', 'warnings'];
-    const rows = profile.distance.map((distance, index) => [distance, pixelSize ? distance * pixelSize : '', profile.validCount[index], profile.rawA[index], profile.rawB[index], profile.correctedA[index], profile.correctedB[index], profile.smoothA[index], profile.smoothB[index], profile.sdA[index], profile.sdB[index], index === 0 ? warnings.length : '', index === 0 ? warnings.join(' | ') : '']);
+    const header = ['distance_px', 'distance_um', 'valid_count', 'raw_A', 'raw_B', 'background_corrected_A', 'background_corrected_B', 'smoothed_A', 'smoothed_B', 'sd_A', 'sd_B', 'channel_A_id', 'channel_A_source_label', 'channel_A_display_label', 'channel_A_source_color', 'channel_B_id', 'channel_B_source_label', 'channel_B_display_label', 'channel_B_source_color', 'warning_count', 'warnings'];
+    const rows = profile.distance.map((distance, index) => [distance, pixelSize ? distance * pixelSize : '', profile.validCount[index], profile.rawA[index], profile.rawB[index], profile.correctedA[index], profile.correctedB[index], profile.smoothA[index], profile.smoothB[index], profile.sdA[index], profile.sdB[index], index === 0 ? channelA.id : '', index === 0 ? channelA.label : '', index === 0 ? channelALabel : '', index === 0 ? channelA.sourceColor ?? '' : '', index === 0 ? channelB.id : '', index === 0 ? channelB.label : '', index === 0 ? channelBLabel : '', index === 0 ? channelB.sourceColor ?? '' : '', index === 0 ? warnings.length : '', index === 0 ? warnings.join(' | ') : '']);
     saveText(`${image.fileName.replace(/\.[^.]+$/, '')}_line_profile.csv`, [header, ...rows].map(row => row.map(csvCell).join(',')).join('\n'), 'text/csv;charset=utf-8');
   };
 
   const exportJson = () => {
+    if (!channelConfirmed) { setError('请先确认通道名称和伪彩。'); return; }
     if (!analysis || !image || !channelA || !channelB) return;
     const payload = {
-      schema: 'FluoroScope analysis 1.2', mode, createdAt: analysis.createdAt,
+      schema: 'FluoroScope analysis 1.3', mode, createdAt: analysis.createdAt,
       source: { fileName: image.fileName, sourceFiles: image.sourceFiles, sha256: image.hash, format: image.format, width: image.width, height: image.height, pageCount: image.pageCount, displayOnly: image.displayOnly },
       channels: mode === 'colocalization'
-        ? { a: { id: channelA.id, label: channelA.label, bitDepth: channelA.bitDepth }, b: { id: channelB.id, label: channelB.label, bitDepth: channelB.bitDepth } }
-        : intensityChannels.map(({ channel, setting }) => ({ id: channel.id, sourceLabel: channel.label, label: setting.label || channel.label, bitDepth: channel.bitDepth, displayColor: setting.color })),
-      parameters: { roi, backgroundRoi, backgroundMethod, background: mode === 'colocalization' ? background : Object.fromEntries(intensityChannels.map(({ channel }) => [channel.id, backgroundByChannel.get(channel.id) ?? { mean: 0, sd: 0 }])), thresholdMethod, manualThresholdPercent: { a: manualA, b: manualB }, displayColors: mode === 'colocalization' ? { a: colorA, b: colorB } : Object.fromEntries(intensityChannels.map(({ channel, setting }) => [channel.id, setting.color])), displayBlackPointPercent: displayBlackPoint, displayBackgroundSuppression: { enabled: Boolean(suppressDisplayBackground && backgroundRoi), method: `background_roi_mean_plus_${DISPLAY_BACKGROUND_SD_MULTIPLIER}sd`, channels: Object.fromEntries(displayBackgroundByChannel) }, scaleBar: { shown: showScaleBar, lengthUm: scaleBarUm }, scanLine, lineChannels: { a: channelA.id, b: channelB.id }, lineWidthPx: lineWidth, gaussianSigmaPx: sigma, pixelSizeUm: pixelSize || null, comparison: 'strict >', costesSignificanceTest: false },
+        ? { a: { id: channelA.id, sourceLabel: channelA.label, label: channelALabel, sourceColor: channelA.sourceColor, bitDepth: channelA.bitDepth }, b: { id: channelB.id, sourceLabel: channelB.label, label: channelBLabel, sourceColor: channelB.sourceColor, bitDepth: channelB.bitDepth } }
+        : intensityChannels.map(({ channel, setting }) => ({ id: channel.id, sourceLabel: channel.label, label: setting.label || channel.label, sourceColor: channel.sourceColor, bitDepth: channel.bitDepth, displayColor: setting.color })),
+      parameters: { roi, backgroundRoi, backgroundMethod, background: mode === 'colocalization' ? background : Object.fromEntries(intensityChannels.map(({ channel }) => [channel.id, backgroundByChannel.get(channel.id) ?? { mean: 0, sd: 0 }])), thresholdMethod, manualThresholdPercent: { a: manualA, b: manualB }, displayColors: mode === 'colocalization' ? { a: displayColorA, b: displayColorB } : Object.fromEntries(intensityChannels.map(({ channel, setting }) => [channel.id, setting.color])), displayRanges: Object.fromEntries(channelSettings.map(setting => [setting.id, { min: setting.displayMin, max: setting.displayMax, preset: setting.displayPreset }])), displayBlackPointPercent: displayBlackPoint, displayBackgroundSuppression: { enabled: Boolean(suppressDisplayBackground && backgroundRoi), method: `background_roi_mean_plus_${DISPLAY_BACKGROUND_SD_MULTIPLIER}sd`, channels: Object.fromEntries(displayBackgroundByChannel) }, scaleBar: { shown: showScaleBar, lengthUm: scaleBarUm }, scanLine, lineChannels: { a: channelA.id, b: channelB.id }, lineWidthPx: lineWidth, gaussianSigmaPx: sigma, pixelSizeUm: pixelSize || null, comparison: 'strict >', costesSignificanceTest: false },
       results: mode === 'colocalization' ? { colocalization: analysis.coloc } : { intensities: analysis.intensities, lineProfile: analysis.profile },
       warnings: [...image.warnings, ...(image.displayOnly ? ['本结果由展示图风险确认后生成，仅供探索。'] : []), ...(analysis.coloc?.warnings ?? []), ...(mode === 'colocalization' ? ['共定位不等于分子相互作用。'] : [])],
     };
@@ -523,13 +612,14 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
 
   const exportRoiImage = async (format: 'png' | 'jpg' | 'tiff') => {
     if (!image || !roi || !channelA || !channelB) { setError('请先使用“正方形裁剪”工具框选要导出的区域。'); return; }
+    if (!channelConfirmed) { setError('请先确认通道名称和伪彩。'); return; }
     if (!isColoc && !intensityChannels.length) { setError('请至少勾选 1 个要显示和导出的通道。'); return; }
     if (showScaleBar && !(pixelSize > 0)) { setError('要显示比例尺，请先填写像素尺寸（µm/px）；也可以取消“导出显示比例尺”。'); return; }
     try {
       setError('');
       const channels = isColoc
-        ? [{ id: channelA.id, color: PSEUDOCOLORS[colorA].rgb, displayFloor: suppressDisplayBackground ? displayBackgroundByChannel.get(channelA.id)?.floor : undefined }, { id: channelB.id, color: PSEUDOCOLORS[colorB].rgb, displayFloor: suppressDisplayBackground ? displayBackgroundByChannel.get(channelB.id)?.floor : undefined }]
-        : intensityChannels.map(({ channel, setting }) => ({ id: channel.id, color: PSEUDOCOLORS[setting.color].rgb, displayFloor: suppressDisplayBackground ? displayBackgroundByChannel.get(channel.id)?.floor : undefined }));
+        ? [{ id: channelA.id, color: PSEUDOCOLORS[displayColorA].rgb, displayMin: channelASetting?.displayMin, displayMax: channelASetting?.displayMax, displayFloor: suppressDisplayBackground ? displayBackgroundByChannel.get(channelA.id)?.floor : undefined }, { id: channelB.id, color: PSEUDOCOLORS[displayColorB].rgb, displayMin: channelBSetting?.displayMin, displayMax: channelBSetting?.displayMax, displayFloor: suppressDisplayBackground ? displayBackgroundByChannel.get(channelB.id)?.floor : undefined }]
+        : intensityChannels.map(({ channel, setting }) => ({ id: channel.id, color: PSEUDOCOLORS[setting.color].rgb, displayMin: setting.displayMin, displayMax: setting.displayMax, displayFloor: suppressDisplayBackground ? displayBackgroundByChannel.get(channel.id)?.floor : undefined }));
       const rendered = renderRoiPseudocolor({
         image,
         channels,
@@ -555,6 +645,10 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   const intensityRows = intensityChannels.map(({ channel, setting }) => ({ channel, setting, stats: analysis?.intensities.find(result => result.id === channel.id)?.stats ?? null }));
   const primaryIntensity = analysis?.intensities[0]?.stats ?? null;
   const primaryIntensityLabel = intensityChannels[0]?.setting.label || intensityChannels[0]?.channel.label || '首个通道';
+  const histogramPosition = (value: number) => histogram ? Math.min(100, Math.max(0, (value - histogram.axisMin) / Math.max(1e-12, histogram.axisMax - histogram.axisMin) * 100)) : 0;
+  const roiSideValue = roiSizeUnit === 'um'
+    ? Number(((roi?.width ?? roiTargetSidePx) * pixelSize).toFixed(2))
+    : Math.round(roi?.width ?? roiTargetSidePx);
 
   return (
     <main className="app-shell" id="top">
@@ -577,35 +671,47 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
           </div>
           {image && <div className="file-facts"><span>{image.format}</span><span>{image.width} × {image.height}</span><span>{image.channels.length} CH</span><span>{image.channels.map(channel => `${channel.bitDepth}-bit`).join(' / ')}</span></div>}
 
-          {isColoc ? <>
-            <div className="field-group"><p>02 · 共定位通道</p><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[colorA].css }} />通道 A<select value={channelAId} onChange={event => setChannelAId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{channel.label}</option>)}</select></label><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[colorB].css }} />通道 B<select value={channelBId} onChange={event => setChannelBId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{channel.label}</option>)}</select></label></div>
-            <div className="field-group"><p>显示伪彩</p><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[colorA].css }} />通道 A<select value={colorA} onChange={event => setColorA(event.target.value as Pseudocolor)}>{Object.entries(PSEUDOCOLORS).map(([value, color]) => <option key={value} value={value}>{color.label}</option>)}</select></label><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[colorB].css }} />通道 B<select value={colorB} onChange={event => setColorB(event.target.value as Pseudocolor)}>{Object.entries(PSEUDOCOLORS).map(([value, color]) => <option key={value} value={value}>{color.label}</option>)}</select></label><small className="field-help">仅改显示，不改数据。</small></div>
-          </> : <>
-            <div className="field-group channel-manager"><p>02 · 通道与伪彩</p>{intensitySettings.map(setting => <div className="channel-setting-row" key={setting.id}><label className="channel-check" title={setting.enabled ? '取消该通道' : '选择该通道'}><input type="checkbox" checked={setting.enabled} disabled={!setting.enabled && enabledIntensityIds.length >= 8} onChange={event => { updateIntensitySetting(setting.id, { enabled: event.target.checked }); if (!event.target.checked && view === `channel:${setting.id}`) setView('overlay'); }} /><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[setting.color].css }} /></label><input aria-label={`${setting.label} 自定义名称`} value={setting.label} onChange={event => updateIntensitySetting(setting.id, { label: event.target.value })} /><select aria-label={`${setting.label} 伪彩`} value={setting.color} onChange={event => updateIntensitySetting(setting.id, { color: event.target.value as Pseudocolor })}>{Object.entries(PSEUDOCOLORS).map(([value, color]) => <option key={value} value={value}>{color.label}</option>)}</select></div>)}{image && <small className="field-help">自动匹配 DAPI / 488 / 555 / 647；最多 8 通道。</small>}</div>
-          </>}
+          <div className={`field-group channel-manager ${channelConfirmed ? 'is-confirmed' : ''}`}>
+            <p>02 · {channelConfirmed ? '通道已确认' : '确认通道'}</p>
+            {image && channelConfirmed ? <button className="channel-confirm compact" onClick={() => setChannelConfirmed(false)}>{channelSettings.length} 个通道 · 修改</button> : <>
+              {channelSettings.map(setting => <div className={`channel-setting-row ${displayChannelId === setting.id ? 'active' : ''}`} key={setting.id} onFocusCapture={() => setDisplayChannelId(setting.id)}>
+                {isColoc ? <span className="channel-check" title={setting.id}><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[setting.color].css }} /></span> : <label className="channel-check" title={setting.enabled ? '取消该通道' : '选择该通道'}><input type="checkbox" checked={setting.enabled} disabled={!setting.enabled && enabledIntensityIds.length >= 8} onChange={event => { updateChannelSetting(setting.id, { enabled: event.target.checked }); if (!event.target.checked && view === `channel:${setting.id}`) setView('overlay'); }} /><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[setting.color].css }} /></label>}
+                <input aria-label={`${setting.label} 自定义名称`} value={setting.label} onChange={event => updateChannelSetting(setting.id, { label: event.target.value })} />
+                <select aria-label={`${setting.label} 伪彩`} value={setting.color} onChange={event => updateChannelSetting(setting.id, { color: event.target.value as Pseudocolor })}>{Object.entries(PSEUDOCOLORS).map(([value, color]) => <option key={value} value={value}>{color.label}</option>)}</select>
+              </div>)}
+              {image && <button className="channel-confirm" onClick={() => { setChannelConfirmed(true); setError(''); }}>确认通道</button>}
+              {image && <small className="field-help">OIR 优先采用 Olympus 原配色。</small>}
+            </>}
+          </div>
 
-          <div className="field-group"><p>{isColoc ? '显示去杂色' : '03 · 去除背景杂色'}</p><label className="scale-toggle"><input type="checkbox" checked={suppressDisplayBackground} disabled={!image || !backgroundRoi} onChange={event => setSuppressDisplayBackground(event.target.checked)} /><span>背景 ROI 均值 + {DISPLAY_BACKGROUND_SD_MULTIPLIER} SD</span></label><label className="range-field"><span>黑场 {displayBlackPoint}%</span><input type="range" min="0" max="60" value={displayBlackPoint} disabled={!image} onChange={event => setDisplayBlackPoint(Number(event.target.value))} /></label><small className="field-help">{backgroundRoi ? '勾选后仅改变显示和图片导出。' : '先用图下方“背景 ROI”框选无信号暗区。'}</small></div>
+          {channelConfirmed && <>
+          {isColoc && <div className="field-group"><p>共定位通道</p><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorA].css }} />通道 A<select value={channelAId} onChange={event => setChannelAId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{channelSettings.find(setting => setting.id === channel.id)?.label || channel.label}</option>)}</select></label><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorB].css }} />通道 B<select value={channelBId} onChange={event => setChannelBId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{channelSettings.find(setting => setting.id === channel.id)?.label || channel.label}</option>)}</select></label></div>}
+
+          {activeDisplaySetting && activeDisplayChannel && histogram && <div className="field-group display-window"><p>显示范围</p><label className="wide-field">通道<select value={activeDisplaySetting.id} onChange={event => setDisplayChannelId(event.target.value)}>{channelSettings.map(setting => <option key={setting.id} value={setting.id}>{setting.label}</option>)}</select></label><svg className="display-histogram" viewBox="0 0 100 32" preserveAspectRatio="none" aria-label={`${activeDisplaySetting.label} 强度直方图`}><polygon points={histogram.points} /><line className="min-marker" x1={histogramPosition(activeDisplaySetting.displayMin)} x2={histogramPosition(activeDisplaySetting.displayMin)} y1="0" y2="32" /><line className="max-marker" x1={histogramPosition(activeDisplaySetting.displayMax)} x2={histogramPosition(activeDisplaySetting.displayMax)} y1="0" y2="32" /></svg><div className="display-presets"><button className={activeDisplaySetting.displayPreset === 'raw' ? 'selected' : ''} onClick={() => setChannelDisplayPreset(activeDisplaySetting.id, 'raw')}>原始</button><button className={activeDisplaySetting.displayPreset === 'auto' ? 'selected' : ''} onClick={() => setChannelDisplayPreset(activeDisplaySetting.id, 'auto')}>自动</button><button className={activeDisplaySetting.displayPreset === 'imagej' ? 'selected' : ''} onClick={() => setChannelDisplayPreset(activeDisplaySetting.id, 'imagej')}>ImageJ</button></div><div className="display-values"><label>Min<input type="number" step={activeDisplayChannel.integer ? 1 : 'any'} value={Number(activeDisplaySetting.displayMin.toPrecision(7))} onChange={event => setManualDisplayValue(activeDisplaySetting.id, 'displayMin', Number(event.target.value))} /></label><label>Max<input type="number" step={activeDisplayChannel.integer ? 1 : 'any'} value={Number(activeDisplaySetting.displayMax.toPrecision(7))} onChange={event => setManualDisplayValue(activeDisplaySetting.id, 'displayMax', Number(event.target.value))} /></label></div><label className="range-field"><span>黑场 {displayBlackPoint}%</span><input type="range" min="0" max="60" value={displayBlackPoint} onChange={event => setDisplayBlackPoint(Number(event.target.value))} /></label><small className="field-help">ImageJ 为 0.35% 饱和近似；仅影响显示和导图。</small></div>}
+
+          <div className="field-group"><p>显示去杂色</p><label className="scale-toggle"><input type="checkbox" checked={suppressDisplayBackground} disabled={!image || !backgroundRoi} onChange={event => setSuppressDisplayBackground(event.target.checked)} /><span>背景 ROI 均值 + {DISPLAY_BACKGROUND_SD_MULTIPLIER} SD</span></label><small className="field-help">{backgroundRoi ? '仅改变显示和图片导出。' : '先在图中框选背景 ROI。'}</small></div>
 
           {!isColoc && <>
-            <div className="field-group"><p>04 · 正方形裁剪与标尺</p>{roi ? <label className="number-field"><span>边长</span><input type="number" min="1" max={image ? Math.min(image.width, image.height) : undefined} value={Math.round(roi.width)} onChange={event => setSquareRoiSide(Number(event.target.value))} /><span>px</span></label> : <small className="field-help">点击图下方“正方形裁剪”，再在图中拖拽框选。</small>}{roi && pixelSize > 0 && <small className="field-help">实际边长：{format(roi.width * pixelSize, 2)} µm；导出保持 {Math.round(roi.width)} × {Math.round(roi.height)} px。</small>}<label className="number-field"><span>像素尺寸</span><input type="number" min="0" step="0.001" value={pixelSize} onChange={event => setPixelSize(Math.max(0, Number(event.target.value) || 0))} /><span>µm/px</span></label><label className="scale-toggle"><input type="checkbox" checked={showScaleBar} onChange={event => setShowScaleBar(event.target.checked)} /><span>导出显示比例尺</span></label>{showScaleBar && <label className="number-field"><span>比例尺</span><input type="number" min="0.1" step="0.1" value={scaleBarUm} onChange={event => setScaleBarUm(Math.max(.1, Number(event.target.value) || .1))} /><span>µm</span></label>}</div>
-            <div className="field-group"><p>线扫描通道（可选）</p><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorA].css }} />通道 A<select value={channelAId} onChange={event => setChannelAId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{intensitySettings.find(setting => setting.id === channel.id)?.label || channel.label}</option>)}</select></label><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorB].css }} />通道 B<select value={channelBId} onChange={event => setChannelBId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{intensitySettings.find(setting => setting.id === channel.id)?.label || channel.label}</option>)}</select></label></div>
+            <div className="field-group"><p>正方形裁剪与标尺</p>{image && <div className="crop-size-field"><span>边长</span><input aria-label="裁剪边长" type="number" min={roiSizeUnit === 'um' ? Math.max(pixelSize, .01) : 1} max={roiSizeUnit === 'um' ? Math.min(image.width, image.height) * pixelSize : Math.min(image.width, image.height)} step={roiSizeUnit === 'um' ? .1 : 1} value={roiSideValue} onChange={event => setSquareRoiSide(Number(event.target.value))} /><select aria-label="裁剪边长单位" value={roiSizeUnit} onChange={event => setRoiSizeUnit(event.target.value as 'px' | 'um')}><option value="px">px</option><option value="um" disabled={!pixelSize}>µm</option></select></div>}<label className="scale-toggle"><input type="checkbox" checked={squareSizeLocked} onChange={event => setSquareSizeLocked(event.target.checked)} /><span>锁定边长，框内拖动</span></label>{roi && pixelSize > 0 && <small className="field-help">{Math.round(roi.width)} px · {format(roi.width * pixelSize, 2)} µm</small>}<label className="number-field"><span>像素尺寸</span><input type="number" min="0" step="0.001" value={pixelSize} onChange={event => { const value = Math.max(0, Number(event.target.value) || 0); setPixelSize(value); if (!value) setRoiSizeUnit('px'); }} /><span>µm/px</span></label><label className="scale-toggle"><input type="checkbox" checked={showScaleBar} onChange={event => setShowScaleBar(event.target.checked)} /><span>导出显示比例尺</span></label>{showScaleBar && <label className="number-field"><span>比例尺</span><input type="number" min="0.1" step="0.1" value={scaleBarUm} onChange={event => setScaleBarUm(Math.max(.1, Number(event.target.value) || .1))} /><span>µm</span></label>}</div>
+            <div className="field-group"><p>线扫描通道（可选）</p><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorA].css }} />通道 A<select value={channelAId} onChange={event => setChannelAId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{channelSettings.find(setting => setting.id === channel.id)?.label || channel.label}</option>)}</select></label><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorB].css }} />通道 B<select value={channelBId} onChange={event => setChannelBId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{channelSettings.find(setting => setting.id === channel.id)?.label || channel.label}</option>)}</select></label></div>
           </>}
 
           {isColoc && <div className="field-group"><p>阈值</p><label className="wide-field">方法<select value={thresholdMethod} onChange={event => setThresholdMethod(event.target.value as ThresholdMethod)}><option value="costes">Costes 自动</option><option value="otsu">Otsu 自动</option><option value="manual">手动阈值</option><option value="none">零阈值</option></select></label>{thresholdMethod === 'manual' && <div className="range-pair"><label>A {manualA}%<input type="range" min="0" max="100" value={manualA} onChange={event => setManualA(Number(event.target.value))} /></label><label>B {manualB}%<input type="range" min="0" max="100" value={manualB} onChange={event => setManualB(Number(event.target.value))} /></label></div>}</div>}
 
           <div className="field-group"><p>{isColoc ? '背景与标尺' : '定量扣背景'}</p><label className="wide-field">方法<select value={backgroundMethod} onChange={event => setBackgroundMethod(event.target.value as BackgroundMethod)}><option value="none">不校正</option><option value="roi">背景 ROI 均值</option><option value="percentile">ROI 第 5 百分位</option></select></label>{isColoc && <><label className="number-field"><span>像素尺寸</span><input type="number" min="0" step="0.001" value={pixelSize} onChange={event => setPixelSize(Math.max(0, Number(event.target.value) || 0))} /><span>µm/px</span></label><label className="scale-toggle"><input type="checkbox" checked={showScaleBar} onChange={event => setShowScaleBar(event.target.checked)} /><span>导出比例尺</span></label>{showScaleBar && <label className="number-field"><span>比例尺</span><input type="number" min="0.1" step="0.1" value={scaleBarUm} onChange={event => setScaleBarUm(Math.max(.1, Number(event.target.value) || .1))} /><span>µm</span></label>}</>}<small className="field-help">{isColoc ? '背景用于计算，标尺用于导图。' : '用于数值计算，与显示去杂色分开。'}</small></div>
           {image?.displayOnly && <label className="risk-confirm"><input type="checkbox" checked={allowDisplayOnly} onChange={event => setAllowDisplayOnly(event.target.checked)} /><span><b>当前是展示图</b>仅在理解伪彩/合并 RGB 风险后进行探索性分析。</span></label>}
+          </>}
         </aside>
 
         <div className="image-stage">
           <div className="stage-toolbar"><div className="view-switch"><button className={view === 'overlay' ? 'selected' : ''} onClick={() => setView('overlay')}>叠加</button>{isColoc ? <><button className={view === 'a' ? 'selected' : ''} onClick={() => setView('a')}>通道 A</button><button className={view === 'b' ? 'selected' : ''} onClick={() => setView('b')}>通道 B</button><button className={view === 'mask' ? 'selected' : ''} onClick={() => setView('mask')} disabled={!analysis?.coloc}>Mask</button></> : intensityChannels.map(({ channel, setting }) => <button key={channel.id} className={view === `channel:${channel.id}` ? 'selected' : ''} onClick={() => setView(`channel:${channel.id}`)}><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[setting.color].css }} />{setting.label || channel.label}</button>)}</div><span>显示设置不影响定量</span></div>
           <div className={`canvas-area tool-${tool}`}>
             {!image && <div className="empty-canvas"><div className="scan-grid" /><span className="crosshair" aria-hidden="true" /><p>等待图像</p><small>可直接选择 FV3000 .oir 原始文件</small></div>}
-            {image && <div className="canvas-stack" style={{ aspectRatio: `${image.width}/${image.height}`, maxWidth: `${Math.min(previewSize.width, MAX_PREVIEW_HEIGHT * image.width / image.height)}px` }}><canvas ref={imageCanvas} /><canvas ref={overlayCanvas} aria-label={`在图像上绘制${tool === 'roi' ? '分析 ROI' : tool === 'background' ? '背景 ROI' : '线扫描'}`} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={() => { setDragStart(null); setDraft(null); }} /></div>}
+            {image && <div className="canvas-stack" style={{ aspectRatio: `${image.width}/${image.height}`, maxWidth: `${Math.min(previewSize.width, MAX_PREVIEW_HEIGHT * image.width / image.height)}px` }}><canvas ref={imageCanvas} /><canvas ref={overlayCanvas} aria-label={`在图像上绘制${tool === 'roi' ? '分析 ROI' : tool === 'background' ? '背景 ROI' : '线扫描'}`} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={() => { setDragStart(null); setDraft(null); setRoiMoveOffset(null); }} /></div>}
           </div>
           <div className="stage-tools" aria-label="绘图工具"><button className={tool === 'roi' ? 'selected' : ''} onClick={() => setTool('roi')}><b>□</b>{isColoc ? '分析 ROI' : '正方形裁剪'}</button><button className={tool === 'background' ? 'selected' : ''} onClick={() => setTool('background')}><b>▧</b>背景 ROI</button>{!isColoc && <button className={tool === 'line' ? 'selected' : ''} onClick={() => setTool('line')}><b>╱</b>线扫描</button>}<span className="tool-spacer" /><button onClick={() => setRoi(null)}>使用全图</button><button onClick={() => { setRoi(null); setBackgroundRoi(null); setScanLine(null); setSuppressDisplayBackground(false); }}>清除标注</button></div>
           <div className="stage-foot"><span>{isColoc ? 'ROI' : '正方形裁剪区'}：{roiText}</span>{!isColoc && <span>线长：{scanLine ? `${format(lineLength, 1)} px${pixelSize ? ` / ${format(lineLength * pixelSize, 2)} µm` : ''}` : '—'}</span>}<span>{isColoc ? `BG A/B：${format(background.a, 2)} / ${format(background.b, 2)}` : `定量背景：${backgroundLabels[backgroundMethod]}`}</span></div>
-          <div className="roi-export-panel"><div><strong>{roi ? isColoc ? `ROI ${Math.round(roi.width)} × ${Math.round(roi.height)} px` : `裁剪边长 ${Math.round(roi.width)} px${pixelSize ? ` · ${format(roi.width * pixelSize, 2)} µm` : ''}` : `先框选${isColoc ? '分析 ROI' : '正方形'}`}</strong><small>图片为伪彩；定量用 CSV / JSON。</small></div><div className="export-actions"><button disabled={!roi} onClick={() => { void exportRoiImage('png'); }}>PNG</button><button disabled={!roi} onClick={() => { void exportRoiImage('jpg'); }}>JPG</button><button disabled={!roi} onClick={() => { void exportRoiImage('tiff'); }}>TIFF</button></div></div>
+          <div className="roi-export-panel"><div><strong>{roi ? isColoc ? `ROI ${Math.round(roi.width)} × ${Math.round(roi.height)} px` : `裁剪边长 ${Math.round(roi.width)} px${pixelSize ? ` · ${format(roi.width * pixelSize, 2)} µm` : ''}` : `先框选${isColoc ? '分析 ROI' : '正方形'}`}</strong><small>图片为伪彩；定量用 CSV / JSON。</small></div><div className="export-actions"><button disabled={!roi || !channelConfirmed} onClick={() => { void exportRoiImage('png'); }}>PNG</button><button disabled={!roi || !channelConfirmed} onClick={() => { void exportRoiImage('jpg'); }}>JPG</button><button disabled={!roi || !channelConfirmed} onClick={() => { void exportRoiImage('tiff'); }}>TIFF</button></div></div>
         </div>
 
         <aside className="results-panel">
@@ -620,22 +726,22 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
             <div className="quick-stats"><span><small>ROI 像素</small><b>{primaryIntensity ? primaryIntensity.pixels.toLocaleString() : '—'}</b></span><span><small>所选通道</small><b>{enabledIntensityIds.length}</b></span><span><small>正方形边长</small><b>{roi ? `${Math.round(roi.width)} px` : '全图'}</b></span></div>
           </>}
           {error && <p className="error-message" role="alert">{error}</p>}
-          <button className="analyze-button" onClick={runAnalysis} disabled={!image || busy || loading || Boolean(image?.displayOnly && !allowDisplayOnly)}>{busy ? '正在计算…' : image ? `运行${isColoc ? '共定位' : '强度'}分析` : '载入图像后分析'} <span>→</span></button>
+          <button className="analyze-button" onClick={runAnalysis} disabled={!image || !channelConfirmed || busy || loading || Boolean(image?.displayOnly && !allowDisplayOnly)}>{busy ? '正在计算…' : image && !channelConfirmed ? '先确认通道' : image ? `运行${isColoc ? '共定位' : '强度'}分析` : '载入图像后分析'} <span>→</span></button>
           <p className="run-note">{isColoc ? `${thresholdLabels[thresholdMethod]} · ` : ''}{backgroundLabels[backgroundMethod]}</p>
         </aside>
       </section>
 
       <section className="detail-section" id="results">
-        <div className="section-title"><h2>{isColoc ? '共定位结果' : '强度结果'}</h2>{analysis && <div className="export-actions"><button onClick={exportRows}>指标 CSV</button><button onClick={exportJson}>完整 JSON</button>{analysis.profile && <button onClick={exportProfile}>线扫 CSV</button>}</div>}</div>
+        <div className="section-title"><h2>{isColoc ? '共定位结果' : '强度结果'}</h2>{analysis && <div className="export-actions"><button disabled={!channelConfirmed} onClick={exportRows}>指标 CSV</button><button disabled={!channelConfirmed} onClick={exportJson}>完整 JSON</button>{analysis.profile && <button disabled={!channelConfirmed} onClick={exportProfile}>线扫 CSV</button>}</div>}</div>
 
         {isColoc && <div className="result-grid">
-          <article className="result-card scatter-card"><header><div><span>共定位散点图</span><small>黄线：阈值 · 洋红线：Costes 回归</small></div><b>{analysis?.coloc ? thresholdLabels[thresholdMethod] : '等待分析'}</b></header><canvas ref={scatterCanvas} aria-label="通道 A 与 B 的强度散点图" /><div className="legend"><span><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[colorA].css }} />X：通道 A</span><span><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[colorB].css }} />Y：通道 B</span></div></article>
+          <article className="result-card scatter-card"><header><div><span>共定位散点图</span><small>黄线：阈值 · 洋红线：Costes 回归</small></div><b>{analysis?.coloc ? thresholdLabels[thresholdMethod] : '等待分析'}</b></header><canvas ref={scatterCanvas} aria-label="通道 A 与 B 的强度散点图" /><div className="legend"><span><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorA].css }} />X：{channelALabel}</span><span><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorB].css }} />Y：{channelBLabel}</span></div></article>
           <article className="result-card coefficients"><header><div><span>共定位指标</span><small>相关与共现分开报告</small></div></header><dl><div><dt>Pearson（无阈值）</dt><dd>{analysis?.coloc ? format(analysis.coloc.pearson) : '—'}</dd></div><div><dt>Pearson（阈值下）</dt><dd>{analysis?.coloc ? format(analysis.coloc.pearsonBelow) : '—'}</dd></div><div><dt>Pearson（阈值上）</dt><dd>{analysis?.coloc ? format(analysis.coloc.pearsonAbove) : '—'}</dd></div><div><dt>Manders M1 / M2</dt><dd>{analysis?.coloc ? `${format(analysis.coloc.m1)} / ${format(analysis.coloc.m2)}` : '—'}</dd></div><div><dt>Manders tM1 / tM2</dt><dd>{analysis?.coloc ? `${format(analysis.coloc.tm1)} / ${format(analysis.coloc.tm2)}` : '—'}</dd></div><div><dt>Manders overlap</dt><dd>{analysis?.coloc ? format(analysis.coloc.overlap) : '—'}</dd></div><div><dt>Li ICQ</dt><dd>{analysis?.coloc ? format(analysis.coloc.icq) : '—'}</dd></div><div><dt>双阳性像素</dt><dd>{analysis?.coloc ? `${analysis.coloc.colocPixels.toLocaleString()} (${format(analysis.coloc.colocAreaPct, 2)}%)` : '—'}</dd></div></dl></article>
         </div>}
 
         {!isColoc && <>
           <article className="result-card intensity-card"><header><div><span>正方形 ROI 荧光强度</span><small>所有已勾选通道分别计算；RawIntDen、背景校正与 CTCF 基于原始像素值</small></div><b>{roi ? `ROI ${roiText}` : '全图'}</b></header><div className="table-wrap"><table><thead><tr><th>通道</th><th>像素数</th><th>Mean</th><th>Median</th><th>SD</th><th>Min–Max</th><th>RawIntDen</th><th>Background</th><th>Corrected Mean</th><th>CTCF</th><th>饱和</th></tr></thead><tbody>{intensityRows.map(({ channel, setting, stats }) => <tr key={channel.id}><td><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[setting.color].css }} />{setting.label || channel.label}</td><td>{stats ? stats.pixels.toLocaleString() : '—'}</td><td>{stats ? format(stats.mean, 2) : '—'}</td><td>{stats ? format(stats.median, 2) : '—'}</td><td>{stats ? format(stats.sd, 2) : '—'}</td><td>{stats ? `${format(stats.min, 1)}–${format(stats.max, 1)}` : '—'}</td><td>{stats ? format(stats.sum, 1) : '—'}</td><td>{stats ? format(stats.backgroundMean, 2) : '—'}</td><td>{stats ? format(stats.correctedMean, 2) : '—'}</td><td>{stats ? format(stats.ctcf, 1) : '—'}</td><td>{stats ? `${format(stats.saturationPct, 2)}%` : '—'}</td></tr>)}</tbody></table></div></article>
-          <article className="result-card profile-card"><header><div><span>荧光线扫描</span><small>沿线每 1 px 双线性采样；线宽内取 mean ± sample SD</small></div><div className="profile-controls"><label>线宽<input type="number" min="1" max="101" value={lineWidth} onChange={event => setLineWidth(Math.max(1, Math.min(101, Number(event.target.value) || 1)))} />px</label><label>Gaussian σ<input type="number" min="0" max="20" step="0.5" value={sigma} onChange={event => setSigma(Math.max(0, Math.min(20, Number(event.target.value) || 0)))} />px</label></div></header>{!scanLine && <p className="profile-empty">选择“线扫描”工具，在图像上拖出一条线；然后运行分析。</p>}<canvas ref={profileCanvas} aria-label="通道 A 与 B 的线扫描曲线" /><div className="legend"><span><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorA].css }} />通道 A · {intensitySettings.find(setting => setting.id === channelA?.id)?.label || channelA?.label}</span><span><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorB].css }} />通道 B · {intensitySettings.find(setting => setting.id === channelB?.id)?.label || channelB?.label}</span><span>横轴：{pixelSize ? `µm（${pixelSize} µm/px）` : 'pixel（未标定）'}</span><span>{sigma > 0 ? `显示 Gaussian σ=${sigma}px；CSV 保留原始曲线` : '未平滑'}</span></div></article>
+          <article className="result-card profile-card"><header><div><span>荧光线扫描</span><small>沿线每 1 px 双线性采样；线宽内取 mean ± sample SD</small></div><div className="profile-controls"><label>线宽<input type="number" min="1" max="101" value={lineWidth} onChange={event => setLineWidth(Math.max(1, Math.min(101, Number(event.target.value) || 1)))} />px</label><label>Gaussian σ<input type="number" min="0" max="20" step="0.5" value={sigma} onChange={event => setSigma(Math.max(0, Math.min(20, Number(event.target.value) || 0)))} />px</label></div></header>{!scanLine && <p className="profile-empty">选择“线扫描”工具，在图像上拖出一条线；然后运行分析。</p>}<canvas ref={profileCanvas} aria-label="通道 A 与 B 的线扫描曲线" /><div className="legend"><span><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorA].css }} />通道 A · {channelALabel}</span><span><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorB].css }} />通道 B · {channelBLabel}</span><span>横轴：{pixelSize ? `µm（${pixelSize} µm/px）` : 'pixel（未标定）'}</span><span>{sigma > 0 ? `显示 Gaussian σ=${sigma}px；CSV 保留原始曲线` : '未平滑'}</span></div></article>
         </>}
 
         <div className="qa-grid">

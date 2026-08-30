@@ -5,7 +5,7 @@ import { fromArrayBuffer } from 'geotiff';
 
 import type { ChannelData } from '../lib/analysis.ts';
 import type { LoadedImage } from '../lib/image.ts';
-import { encodePseudocolorTiff, renderRoiPseudocolor, ROI_TIFF_DESCRIPTION } from '../lib/roi-export.ts';
+import { encodePseudocolorTiff, renderRoiPseudocolor, resolveDisplayRange, ROI_TIFF_DESCRIPTION } from '../lib/roi-export.ts';
 
 const channel = (id: string, values: number[]): ChannelData => ({
   id,
@@ -76,6 +76,16 @@ test('display background floor suppresses weak pixels without mutating source da
   assert.deepEqual(Array.from(rendered.rgb.slice(5 * 3, 5 * 3 + 3)), [0, 0, 0]);
   assert.ok(rendered.rgb[7 * 3 + 1] > 0);
   assert.deepEqual(Array.from(source.channels[0].data), before);
+});
+
+test('explicit per-channel display window is linear and shared by ROI export', () => {
+  const signal = channel('a', [0, 10, 20, 30, 40]);
+  assert.deepEqual(resolveDisplayRange(signal, 5, 1, { displayMin: 10, displayMax: 30 }), { low: 10, high: 30, range: 20 });
+  const rendered = renderRoiPseudocolor({
+    image: image(5, 1, [signal]),
+    channels: [{ id: 'a', color: 'red', displayMin: 10, displayMax: 30 }],
+  });
+  assert.deepEqual(Array.from(rendered.rgb), [0, 0, 0, 0, 0, 0, 128, 0, 0, 255, 0, 0, 255, 0, 0]);
 });
 
 test('Olympus base pseudocolors use pure additive channel LUTs', () => {

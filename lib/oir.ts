@@ -6,6 +6,7 @@ import type { NumericArray } from './analysis';
 export interface ParsedOirChannel {
   id: string;
   label: string;
+  lut: string | null;
   data: NumericArray;
 }
 
@@ -14,6 +15,7 @@ export interface ParsedOir {
   height: number;
   bitDepth: number;
   pixelSizeUm: number | null;
+  pixelSizeWarning: string | null;
   channels: ParsedOirChannel[];
   blockCount: number;
   sizeZ: number;
@@ -132,9 +134,11 @@ function activeAxisMaxSize(documents: string[], axisType: 'ZSTACK' | 'TIMELAPSE'
   return null;
 }
 
-function channelLabel(documents: string[], id: string, fallback: string) {
+function channelMetadata(documents: string[], id: string, fallback: string) {
   let best = '';
   let score = -1;
+  let lut: string | null = null;
+  let order: number | null = null;
   const token = `id="${id}"`;
   for (const xml of documents) {
     for (let position = xml.indexOf(token); position >= 0; position = xml.indexOf(token, position + token.length)) {
@@ -152,9 +156,12 @@ function channelLabel(documents: string[], id: string, fallback: string) {
       const candidate = dye || device || name || '';
       const candidateScore = dye ? 3 : device ? 2 : name ? 1 : 0;
       if (candidate && candidateScore > score) { best = candidate; score = candidateScore; }
+      lut ??= section.match(/<(?:[\w.-]+:)?lut>\s*([^<]+?)\s*<\//)?.[1]?.trim() || null;
+      const parsedOrder = Number(xml.slice(open, openEnd).match(/\border="(\d+)"/)?.[1]);
+      if (order === null && Number.isInteger(parsedOrder)) order = parsedOrder;
     }
   }
-  return best || fallback;
+  return { label: best || fallback, lut, order };
 }
 
 function readPlane(bytes: Uint8Array, view: DataView, blocks: PixelBlock[], bytesPerSample: number, pixels: number): NumericArray {
@@ -240,21 +247,31 @@ export function parseOir(buffer: ArrayBuffer): ParsedOir {
   const view = new DataView(buffer);
   const channels = [...grouped.entries()].map(([id, channel], index) => {
     const planes = completeZ.map(zIndex => channel.get(zIndex)!);
+    const metadata = channelMetadata(documents, id, `通道 ${index + 1}`);
     return {
       id,
-      label: channelLabel(documents, id, `通道 ${index + 1}`),
+      label: metadata.label,
+      lut: metadata.lut,
+      order: metadata.order,
+      fallbackOrder: index,
       data: planes.length === 1 ? readPlane(bytes, view, planes[0], bytesPerSample, pixels) : maxProjection(bytes, view, planes, bytesPerSample, pixels),
     };
-  });
+  }).sort((a, b) => (a.order ?? Number.MAX_SAFE_INTEGER) - (b.order ?? Number.MAX_SAFE_INTEGER) || a.fallbackOrder - b.fallbackOrder)
+    .map(channel => ({ id: channel.id, label: channel.label, lut: channel.lut, data: channel.data }));
 
-  const length = documents.map(xml => xml.match(/<(?:[\w.-]+:)?length>\s*<(?:[\w.-]+:)?x>\s*([+\-\d.eE]+)/)?.[1]).find(Boolean);
-  const pixelSize = Number(length);
+  const length = documents.map(xml => xml.match(/<(?:[\w.-]+:)?length\b[^>]*>([\s\S]*?)<\/(?:[\w.-]+:)?length>/)?.[1]).find(Boolean);
+  const axis = (name: 'x' | 'y') => Number(length?.match(new RegExp(`<(?:[\\w.-]+:)?${name}>\\s*([+\\-\\d.eE]+)`))?.[1]);
   const nanometers = documents.some(xml => /<(?:[\w.-]+:)?pixelUnit>[\s\S]*?NANO_METER[\s\S]*?<\/(?:[\w.-]+:)?pixelUnit>/.test(xml));
+  const convertPixelSize = (value: number) => Number.isFinite(value) && value > 0 ? (nanometers ? value / 1000 : value) : null;
+  const pixelSizeX = convertPixelSize(axis('x'));
+  const pixelSizeY = convertPixelSize(axis('y'));
+  const anisotropic = pixelSizeX !== null && pixelSizeY !== null && Math.abs(pixelSizeX - pixelSizeY) > Math.max(pixelSizeX, pixelSizeY) * 1e-6;
   return {
     width,
     height,
     bitDepth: effectiveBits,
-    pixelSizeUm: Number.isFinite(pixelSize) && pixelSize > 0 ? (nanometers ? pixelSize / 1000 : pixelSize) : null,
+    pixelSizeUm: anisotropic ? null : pixelSizeX ?? pixelSizeY,
+    pixelSizeWarning: anisotropic ? `X/Y 像素尺寸不同（${pixelSizeX} / ${pixelSizeY} µm）；已停用自动 µm 正方形与比例尺，请手动核对。` : null,
     channels,
     blockCount: blocks.length,
     sizeZ: completeZ.length,

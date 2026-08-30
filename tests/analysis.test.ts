@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { calculateColocalization, intensityStats, lineProfile, type ChannelData } from '../lib/analysis.ts';
+import { calculateColocalization, displayWindow, fitSquareRoi, intensityStats, lineProfile, type ChannelData } from '../lib/analysis.ts';
 import { collapsePseudocolor } from '../lib/image.ts';
 import { parseOir } from '../lib/oir.ts';
 
@@ -75,6 +75,20 @@ test('intensity background correction keeps signed CTCF', () => {
   assert.equal(stats.ctcf, 32);
 });
 
+test('square ROI keeps its requested size when moved against image edges', () => {
+  assert.deepEqual(fitSquareRoi(100, 80, 95, 75, 20), { x: 80, y: 60, width: 20, height: 20 });
+  assert.deepEqual(fitSquareRoi(100, 80, -20, -10, 120), { x: 0, y: 0, width: 80, height: 80 });
+});
+
+test('display presets preserve raw detector range and provide clipped preview windows', () => {
+  const raw12: ChannelData = { id: 'raw12', label: '12-bit', data: new Uint16Array(Array.from({ length: 1000 }, (_, index) => index)), maxValue: 4095, bitDepth: 12, integer: true };
+  assert.deepEqual(displayWindow(raw12, 1000, 1, 'raw'), { min: 0, max: 4095 });
+  const imagej = displayWindow(raw12, 1000, 1, 'imagej');
+  const auto = displayWindow(raw12, 1000, 1, 'auto');
+  assert.ok(imagej.min > 0 && imagej.max < 1000);
+  assert.ok(auto.min > imagej.min && auto.max < imagej.max);
+});
+
 test('horizontal line profile samples a known gradient', () => {
   const gradient = Array.from({ length: 25 }, (_, index) => index % 5);
   const profile = lineProfile(channel('a', gradient), channel('b', gradient), 5, 5, { x1: 0, y1: 2, x2: 4, y2: 2 }, 1, 0);
@@ -125,6 +139,23 @@ test('FV3000 OIR pixels, metadata, and Z projection are read locally', () => {
   assert.equal(parsed.discardedTrailingZ, 1);
   assert.equal(parsed.channels[0].label, 'DAPI');
   assert.deepEqual(Array.from(parsed.channels[0].data), [2, 100, 20, 4095]);
+});
+
+test('FV3000 OIR honors channel order and preserves Olympus LUT names', () => {
+  const text = new TextEncoder();
+  const frame = text.encode('<?xml version="1.0"?><lsmframe:frameProperties><commonframe:imageDefinition><base:width>2</base:width><base:height>1</base:height><base:bitCounts>12</base:bitCounts></commonframe:imageDefinition></lsmframe:frameProperties>');
+  const metadata = text.encode('<?xml version="1.0"?><root:metadata><commonphase:channel id="a" order="2"><lsmimage:dyeName>Alexa Fluor 555</lsmimage:dyeName><dye:lut>Orange</dye:lut></commonphase:channel><commonphase:channel id="b" order="1"><lsmimage:dyeName>DAPI</lsmimage:dyeName><dye:lut>Blue</dye:lut></commonphase:channel></root:metadata>');
+  const parsed = parseOir(joinBytes(text.encode('OLYMPUSRAWFORMAT'), frame, metadata, syntheticOirBlock('z001_0_1_a_0', [10, 20]), syntheticOirBlock('z001_0_1_b_0', [1, 2])).buffer as ArrayBuffer);
+  assert.deepEqual(parsed.channels.map(item => [item.id, item.label, item.lut]), [['b', 'DAPI', 'Blue'], ['a', 'Alexa Fluor 555', 'Orange']]);
+});
+
+test('FV3000 OIR disables scalar micron calibration when X and Y differ', () => {
+  const text = new TextEncoder();
+  const frame = text.encode('<?xml version="1.0"?><lsmframe:frameProperties><commonframe:imageDefinition><base:width>2</base:width><base:height>1</base:height><base:bitCounts>12</base:bitCounts></commonframe:imageDefinition></lsmframe:frameProperties>');
+  const metadata = text.encode('<?xml version="1.0"?><root:metadata><commonphase:channel id="a" order="1"><lsmimage:dyeName>DAPI</lsmimage:dyeName><commonphase:length><commonparam:x>0.25</commonparam:x><commonparam:y>0.5</commonparam:y></commonphase:length><commonphase:pixelUnit><commonphase:x>MICRO_METER</commonphase:x></commonphase:pixelUnit></commonphase:channel></root:metadata>');
+  const parsed = parseOir(joinBytes(text.encode('OLYMPUSRAWFORMAT'), frame, metadata, syntheticOirBlock('z001_0_1_a_0', [1, 2])).buffer as ArrayBuffer);
+  assert.equal(parsed.pixelSizeUm, null);
+  assert.match(parsed.pixelSizeWarning ?? '', /X\/Y 像素尺寸不同/);
 });
 
 test('FV3000 OIR reports when metadata declares missing Z planes', () => {

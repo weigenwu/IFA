@@ -1,6 +1,6 @@
 import type { GeotiffWriterMetadata } from 'geotiff';
 
-import { boundsFor, percentileInRoi, type Rect } from './analysis.ts';
+import { boundsFor, percentileInRoi, type ChannelData, type Rect } from './analysis.ts';
 import type { LoadedImage } from './image.ts';
 
 export type PseudocolorName = 'green' | 'red' | 'blue' | 'cyan' | 'magenta' | 'yellow' | 'gray';
@@ -13,6 +13,8 @@ export interface RoiExportChannel {
   enabled?: boolean;
   /** Optional display-only floor, normally derived from a blank background ROI. */
   displayFloor?: number;
+  displayMin?: number;
+  displayMax?: number;
 }
 
 export interface RoiExportMask {
@@ -71,6 +73,24 @@ const PSEUDOCOLOR_RGB: Record<PseudocolorName, NormalizedRgb> = {
 };
 
 const clamp = (value: number, low: number, high: number) => Math.min(high, Math.max(low, value));
+
+export function resolveDisplayRange(
+  channel: ChannelData,
+  width: number,
+  height: number,
+  options: Pick<RoiExportChannel, 'displayFloor' | 'displayMin' | 'displayMax'> & { blackPointPercent?: number } = {},
+) {
+  const observedMin = percentileInRoi(channel, width, height, null, 0);
+  const observedMax = percentileInRoi(channel, width, height, null, 1);
+  const requestedMin = Number.isFinite(options.displayMin) ? Number(options.displayMin) : observedMin;
+  const requestedMax = Number.isFinite(options.displayMax) ? Number(options.displayMax) : observedMax;
+  const high = requestedMax > requestedMin ? requestedMax : requestedMin + 1;
+  const floor = Number.isFinite(options.displayFloor) ? Number(options.displayFloor) : requestedMin;
+  const displayLow = Math.min(high, Math.max(requestedMin, floor));
+  const blackPoint = clamp(Number.isFinite(options.blackPointPercent) ? Number(options.blackPointPercent) : 0, 0, 99.9);
+  const low = displayLow + Math.max(0, high - displayLow) * blackPoint / 100;
+  return { low, high, range: Math.max(1e-12, high - low) };
+}
 
 function colorRgb(color: RoiExportChannel['color']): NormalizedRgb {
   if (typeof color === 'string') return PSEUDOCOLOR_RGB[color];
@@ -202,12 +222,8 @@ export function renderRoiPseudocolor(options: RenderRoiOptions): RenderedRoi {
     const channel = image.channels.find(candidate => candidate.id === setting.id);
     if (!channel) throw new Error(`找不到要导出的通道：${setting.id}`);
     if (channel.data.length < image.width * image.height) throw new Error(`通道 ${channel.label} 的像素数量不足。`);
-    const baseLow = percentileInRoi(channel, image.width, image.height, null, 0);
-    const high = percentileInRoi(channel, image.width, image.height, null, 1);
-    const displayFloor = Number.isFinite(setting.displayFloor) ? Number(setting.displayFloor) : baseLow;
-    const displayLow = Math.min(high, Math.max(baseLow, displayFloor));
-    const low = displayLow + Math.max(0, high - displayLow) * blackPointPercent / 100;
-    return { channel, rgb: colorRgb(setting.color), low, range: Math.max(1e-12, high - low) };
+    const range = resolveDisplayRange(channel, image.width, image.height, { ...setting, blackPointPercent });
+    return { channel, rgb: colorRgb(setting.color), ...range };
   });
   if (!selected.length) throw new Error('当前视图对应的通道未被选择，无法导出。');
 
