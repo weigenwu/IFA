@@ -128,6 +128,30 @@ test('optional scale bar is drawn at its requested pixel length with a label', (
   assert.ok(whitePixels >= 40, 'white bar and label should be burned into RGB pixels');
 });
 
+test('Merge and every single-channel export share the exact ROI and scale bar', () => {
+  const red = new Array(5000).fill(0); red[0] = 255;
+  const green = new Array(5000).fill(0); green[1] = 255;
+  const source = image(100, 50, [channel('red', red), channel('green', green)]);
+  const common = {
+    image: source,
+    channels: [{ id: 'red', color: 'red' as const }, { id: 'green', color: 'green' as const }],
+    roi: { x: 0, y: 0, width: 100, height: 50 },
+    pixelSizeUm: 0.1,
+    scaleBarUm: 2,
+  };
+  const merge = renderRoiPseudocolor({ ...common, view: 'overlay' });
+  const redOnly = renderRoiPseudocolor({ ...common, view: 'channel:red' });
+  const greenOnly = renderRoiPseudocolor({ ...common, view: 'channel:green' });
+
+  for (const rendered of [merge, redOnly, greenOnly]) {
+    assert.deepEqual(rendered.sourceRoi, { x: 0, y: 0, width: 100, height: 50 });
+    assert.deepEqual(rendered.scaleBar, { rendered: true, label: '2 µm', requestedUm: 2, pixelLength: 20 });
+  }
+  assert.deepEqual(Array.from(merge.rgb.slice(0, 6)), [255, 0, 0, 0, 255, 0]);
+  assert.deepEqual(Array.from(redOnly.rgb.slice(0, 6)), [255, 0, 0, 0, 0, 0]);
+  assert.deepEqual(Array.from(greenOnly.rgb.slice(0, 6)), [0, 0, 0, 0, 255, 0]);
+});
+
 test('TIFF encoder writes readable interleaved 8-bit RGB and identifies pseudocolor data', async () => {
   const rendered = {
     rgb: new Uint8Array([

@@ -2,6 +2,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  boundsFor,
   calculateColocalization,
   displayWindow,
   fitSquareRoi,
@@ -18,6 +19,7 @@ import {
   type Rect,
 } from '../lib/analysis';
 import { loadImages, type LoadedImage } from '../lib/image';
+import { createStoredZip, safeFilePart } from '../lib/export-archive';
 import { encodePseudocolorTiff, renderRoiPseudocolor, renderedRoiToBlob, resolveDisplayRange } from '../lib/roi-export';
 
 type Tool = 'roi' | 'background' | 'line';
@@ -28,6 +30,8 @@ type AnalysisMode = 'colocalization' | 'intensity';
 type Pseudocolor = 'green' | 'red' | 'blue' | 'cyan' | 'magenta' | 'yellow' | 'orange' | 'violet' | 'gray';
 type RoiCorner = 'nw' | 'ne' | 'sw' | 'se';
 type RoiSizeUnit = 'px' | 'um' | 'mm' | 'cm';
+type RoiExportFormat = 'png' | 'jpg' | 'tiff';
+type IntensityExportTarget = 'merge' | 'all' | `channel:${string}`;
 
 interface RoiResizeState {
   anchor: { x: number; y: number };
@@ -69,6 +73,7 @@ const thresholdLabels: Record<ThresholdMethod, string> = { costes: 'Costes 自�
 const backgroundLabels: Record<BackgroundMethod, string> = { none: '未校正', roi: '背景 ROI 均值', percentile: '分析 ROI 第 5 百分位' };
 const FALLBACK_COLORS: Pseudocolor[] = ['blue', 'green', 'red', 'magenta', 'cyan', 'yellow', 'orange', 'violet', 'gray'];
 const MAX_PREVIEW_HEIGHT = 800;
+const MAX_BATCH_RGB_BYTES = 128 * 1024 * 1024;
 const DISPLAY_BACKGROUND_SD_MULTIPLIER = 2;
 const MICRONS_PER_UNIT = { um: 1, mm: 1000, cm: 10000 } as const;
 const ROI_UNIT_LABELS: Record<RoiSizeUnit, string> = { px: 'px', um: 'µm', mm: 'mm', cm: 'cm' };
@@ -206,6 +211,8 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   const [roiSizeUnit, setRoiSizeUnit] = useState<RoiSizeUnit>('px');
   const [squareSizeLocked, setSquareSizeLocked] = useState(false);
   const [roiTargetSidePx, setRoiTargetSidePx] = useState(256);
+  const [intensityExportTarget, setIntensityExportTarget] = useState<IntensityExportTarget>('merge');
+  const [exportingRoi, setExportingRoi] = useState<RoiExportFormat | null>(null);
   const [roiMoveOffset, setRoiMoveOffset] = useState<{ x: number; y: number } | null>(null);
   const [roiResize, setRoiResize] = useState<RoiResizeState | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
@@ -299,7 +306,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       const green = loaded.channels.find(channel => channel.id === 'green') ?? loaded.channels.find(channel => channel.id === fluorescence[0]?.id) ?? loaded.channels[0];
       const red = loaded.channels.find(channel => channel.id === 'red') ?? loaded.channels.find(channel => channel.id === fluorescence[1]?.id) ?? loaded.channels[1] ?? loaded.channels[0];
       setChannelAId(green.id); setChannelBId(red.id);
-      setRoi(null); setBackgroundRoi(null); setScanLine(null); setView('overlay'); setTool('roi');
+      setRoi(null); setBackgroundRoi(null); setScanLine(null); setView('overlay'); setIntensityExportTarget('merge'); setTool('roi');
       const loadedPixelSize = loaded.pixelSizeUm ?? 0;
       setPixelSize(loadedPixelSize); setScaleBarUm(suggestedScaleBarUm(loaded.width, loadedPixelSize));
       setDisplayBlackPoint(0); setSuppressDisplayBackground(false); setShowScaleBar(true); setAllowDisplayOnly(false);
@@ -704,32 +711,65 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     saveText(`${image.fileName.replace(/\.[^.]+$/, '')}_${mode}_analysis.json`, JSON.stringify(payload, null, 2), 'application/json');
   };
 
-  const exportRoiImage = async (format: 'png' | 'jpg' | 'tiff') => {
+  const exportRoiImage = async (format: RoiExportFormat) => {
     if (!image || !roi || !channelA || !channelB) { setError('请先使用“正方形裁剪”工具框选要导出的区域。'); return; }
     if (!channelConfirmed) { setError('请先确认通道名称和伪彩。'); return; }
     if (!isColoc && !intensityChannels.length) { setError('请至少勾选 1 个要显示和导出的通道。'); return; }
     if (showScaleBar && !(pixelSize > 0)) { setError('要显示比例尺，请先填写像素尺寸（µm/px）；也可以取消“导出显示比例尺”。'); return; }
+    if (exportingRoi) return;
+    setExportingRoi(format);
     try {
       setError('');
       const channels = isColoc
         ? [{ id: channelA.id, color: PSEUDOCOLORS[displayColorA].rgb, displayMin: channelASetting?.displayMin, displayMax: channelASetting?.displayMax, displayFloor: suppressDisplayBackground ? displayBackgroundByChannel.get(channelA.id)?.floor : undefined }, { id: channelB.id, color: PSEUDOCOLORS[displayColorB].rgb, displayMin: channelBSetting?.displayMin, displayMax: channelBSetting?.displayMax, displayFloor: suppressDisplayBackground ? displayBackgroundByChannel.get(channelB.id)?.floor : undefined }]
         : intensityChannels.map(({ channel, setting }) => ({ id: channel.id, color: PSEUDOCOLORS[setting.color].rgb, displayMin: setting.displayMin, displayMax: setting.displayMax, displayFloor: suppressDisplayBackground ? displayBackgroundByChannel.get(channel.id)?.floor : undefined }));
-      const rendered = renderRoiPseudocolor({
-        image,
-        channels,
-        roi,
-        view,
-        blackPointPercent: displayBlackPoint,
-        pixelSizeUm: showScaleBar ? pixelSize : null,
-        scaleBarUm: showScaleBar ? scaleBarUm : null,
-        mask: view === 'mask' && analysis?.coloc ? { channelAId: channelA.id, channelBId: channelB.id, thresholdA: analysis.coloc.thresholdA, thresholdB: analysis.coloc.thresholdB, backgroundA: background.a, backgroundB: background.b } : null,
-      });
-      const stem = image.fileName.replace(/\.[^.]+$/, '');
-      const name = `${stem}_ROI_${rendered.width}x${rendered.height}`;
-      if (format === 'tiff') saveBlob(`${name}_pseudocolor.tif`, new Blob([await encodePseudocolorTiff(rendered)], { type: 'image/tiff' }));
-      else saveBlob(`${name}.${format}`, await renderedRoiToBlob(rendered, format));
-      if (rendered.scaleBar && !rendered.scaleBar.rendered) setError(`图片已导出，但${rendered.scaleBar.reason}`);
+      const selectedIntensity = intensityChannels.find(({ channel }) => `channel:${channel.id}` === intensityExportTarget);
+      const selectedIntensityIndex = intensityChannels.findIndex(({ channel }) => `channel:${channel.id}` === intensityExportTarget);
+      const intensityJobs = intensityExportTarget === 'all'
+        ? [{ view: 'overlay' as View, suffix: '00_Merge' }, ...intensityChannels.map(({ channel, setting }, index) => ({ view: `channel:${channel.id}` as View, suffix: `${String(index + 1).padStart(2, '0')}_${safeFilePart(setting.label || channel.label, `Channel_${index + 1}`)}` }))]
+        : intensityExportTarget === 'merge'
+          ? [{ view: 'overlay' as View, suffix: 'Merge' }]
+          : [{ view: intensityExportTarget as View, suffix: `${String(Math.max(1, selectedIntensityIndex + 1)).padStart(2, '0')}_${safeFilePart(selectedIntensity?.setting.label || selectedIntensity?.channel.label || 'Channel')}` }];
+      const colocSuffix = view === 'overlay' ? 'Merge' : view === 'a' ? `A_${safeFilePart(channelALabel, 'Channel_A')}` : view === 'b' ? `B_${safeFilePart(channelBLabel, 'Channel_B')}` : view === 'mask' ? 'Mask' : safeFilePart(view, 'Channel');
+      const jobs = isColoc ? [{ view, suffix: colocSuffix }] : intensityJobs;
+      const exportBounds = boundsFor(image.width, image.height, roi);
+      const estimatedBatchRgbBytes = (exportBounds.x1 - exportBounds.x0) * (exportBounds.y1 - exportBounds.y0) * 3 * jobs.length;
+      if (jobs.length > 1 && estimatedBatchRgbBytes > MAX_BATCH_RGB_BYTES) throw new Error('批量裁剪区域过大。为避免浏览器卡死，请缩小裁剪框，或改为分别导出单通道。');
+      const extension = format === 'tiff' ? 'tif' : format;
+      const mime = format === 'tiff' ? 'image/tiff' : format === 'jpg' ? 'image/jpeg' : 'image/png';
+      const archiveEntries: Array<{ name: string; data: ArrayBuffer }> = [];
+      let baseName = '';
+
+      for (const job of jobs) {
+        const rendered = renderRoiPseudocolor({
+          image,
+          channels,
+          roi,
+          view: job.view,
+          blackPointPercent: displayBlackPoint,
+          pixelSizeUm: showScaleBar ? pixelSize : null,
+          scaleBarUm: showScaleBar ? scaleBarUm : null,
+          mask: job.view === 'mask' && analysis?.coloc ? { channelAId: channelA.id, channelBId: channelB.id, thresholdA: analysis.coloc.thresholdA, thresholdB: analysis.coloc.thresholdB, backgroundA: background.a, backgroundB: background.b } : null,
+        });
+        if (showScaleBar && !rendered.scaleBar?.rendered) throw new Error(`${rendered.scaleBar?.reason ?? '比例尺无法显示。'}请增大裁剪框或缩短比例尺后再导出。`);
+        if (!baseName) {
+          const source = rendered.sourceRoi;
+          baseName = `${safeFilePart(image.fileName.replace(/\.[^.]+$/, ''), 'image')}_ROI-x${source.x}-y${source.y}-${source.width}x${source.height}px`;
+        }
+        const data = format === 'tiff'
+          ? await encodePseudocolorTiff(rendered)
+          : await (await renderedRoiToBlob(rendered, format)).arrayBuffer();
+        archiveEntries.push({ name: `${baseName}_${job.suffix}.${extension}`, data });
+      }
+
+      if (!isColoc && intensityExportTarget === 'all') {
+        const archive = await createStoredZip(archiveEntries);
+        saveBlob(`${baseName}_Merge+Channels_${format.toUpperCase()}.zip`, new Blob([archive], { type: 'application/zip' }));
+      } else {
+        saveBlob(archiveEntries[0].name, new Blob([archiveEntries[0].data], { type: mime }));
+      }
     } catch (problem) { setError(problem instanceof Error ? problem.message : 'ROI 图片导出失败。'); }
+    finally { setExportingRoi(null); }
   };
 
   const roiText = roi
@@ -778,7 +818,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
             <p>02 · {channelConfirmed ? '通道已确认' : '确认通道'}</p>
             {image && channelConfirmed ? <button className="channel-confirm compact" onClick={() => setChannelConfirmed(false)}>{channelSettings.length} 个通道 · 修改</button> : <>
               {channelSettings.map(setting => <div className={`channel-setting-row ${displayChannelId === setting.id ? 'active' : ''}`} key={setting.id} onFocusCapture={() => setDisplayChannelId(setting.id)}>
-                {isColoc ? <span className="channel-check" title={setting.id}><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[setting.color].css }} /></span> : <label className="channel-check" title={setting.enabled ? '取消该通道' : '选择该通道'}><input type="checkbox" checked={setting.enabled} disabled={!setting.enabled && enabledIntensityIds.length >= 8} onChange={event => { updateChannelSetting(setting.id, { enabled: event.target.checked }); if (!event.target.checked && view === `channel:${setting.id}`) setView('overlay'); }} /><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[setting.color].css }} /></label>}
+                {isColoc ? <span className="channel-check" title={setting.id}><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[setting.color].css }} /></span> : <label className="channel-check" title={setting.enabled ? '取消该通道' : '选择该通道'}><input type="checkbox" checked={setting.enabled} disabled={!setting.enabled && enabledIntensityIds.length >= 8} onChange={event => { updateChannelSetting(setting.id, { enabled: event.target.checked }); if (!event.target.checked && (view === `channel:${setting.id}` || intensityExportTarget === `channel:${setting.id}`)) { setView('overlay'); setIntensityExportTarget('merge'); } }} /><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[setting.color].css }} /></label>}
                 <input aria-label={`${setting.label} 自定义名称`} value={setting.label} onChange={event => updateChannelSetting(setting.id, { label: event.target.value })} />
                 <select aria-label={`${setting.label} 伪彩`} value={setting.color} onChange={event => updateChannelSetting(setting.id, { color: event.target.value as Pseudocolor })}>{Object.entries(PSEUDOCOLORS).map(([value, color]) => <option key={value} value={value}>{color.label}</option>)}</select>
               </div>)}
@@ -807,14 +847,14 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
         </aside>
 
         <div className="image-stage">
-          <div className="stage-toolbar"><div className="view-switch"><button className={view === 'overlay' ? 'selected' : ''} onClick={() => setView('overlay')}>叠加</button>{isColoc ? <><button className={view === 'a' ? 'selected' : ''} onClick={() => setView('a')}>通道 A</button><button className={view === 'b' ? 'selected' : ''} onClick={() => setView('b')}>通道 B</button><button className={view === 'mask' ? 'selected' : ''} onClick={() => setView('mask')} disabled={!analysis?.coloc}>Mask</button></> : intensityChannels.map(({ channel, setting }) => <button key={channel.id} className={view === `channel:${channel.id}` ? 'selected' : ''} onClick={() => setView(`channel:${channel.id}`)}><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[setting.color].css }} />{setting.label || channel.label}</button>)}</div><span>显示设置不影响定量</span></div>
+          <div className="stage-toolbar"><div className="view-switch"><button className={view === 'overlay' ? 'selected' : ''} onClick={() => { setView('overlay'); if (!isColoc) setIntensityExportTarget('merge'); }}>Merge</button>{isColoc ? <><button className={view === 'a' ? 'selected' : ''} onClick={() => setView('a')}>通道 A</button><button className={view === 'b' ? 'selected' : ''} onClick={() => setView('b')}>通道 B</button><button className={view === 'mask' ? 'selected' : ''} onClick={() => setView('mask')} disabled={!analysis?.coloc}>Mask</button></> : intensityChannels.map(({ channel, setting }) => <button key={channel.id} className={view === `channel:${channel.id}` ? 'selected' : ''} onClick={() => { setView(`channel:${channel.id}`); setIntensityExportTarget(`channel:${channel.id}`); }}><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[setting.color].css }} />{setting.label || channel.label}</button>)}</div><span>显示设置不影响定量</span></div>
           <div className={`canvas-area tool-${tool}`}>
             {!image && <div className="empty-canvas"><div className="scan-grid" /><span className="crosshair" aria-hidden="true" /><p>等待图像</p><small>可直接选择 FV3000 .oir 原始文件</small></div>}
             {image && <div className="canvas-stack" style={{ aspectRatio: `${image.width}/${image.height}`, maxWidth: `${Math.min(previewSize.width, MAX_PREVIEW_HEIGHT * image.width / image.height)}px` }}><canvas ref={imageCanvas} /><canvas ref={overlayCanvas} aria-label={`在图像上绘制${tool === 'roi' ? '分析 ROI' : tool === 'background' ? '背景 ROI' : '线扫描'}`} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={event => { setDragStart(null); setDraft(null); setRoiMoveOffset(null); setRoiResize(null); event.currentTarget.style.cursor = ''; }} /></div>}
           </div>
           <div className="stage-tools" aria-label="绘图工具"><button className={tool === 'roi' ? 'selected' : ''} onClick={() => setTool('roi')}><b>□</b>{isColoc ? '分析 ROI' : '正方形裁剪'}</button><button className={tool === 'background' ? 'selected' : ''} onClick={() => setTool('background')}><b>▧</b>背景 ROI</button>{!isColoc && <button className={tool === 'line' ? 'selected' : ''} onClick={() => setTool('line')}><b>╱</b>线扫描</button>}<span className="tool-spacer" /><button onClick={() => setRoi(null)}>使用全图</button><button onClick={() => { setRoi(null); setBackgroundRoi(null); setScanLine(null); setSuppressDisplayBackground(false); }}>清除标注</button></div>
           <div className="stage-foot"><span>{isColoc ? 'ROI' : '正方形裁剪区'}：{roiText}{!isColoc && layoutReferenceCm !== null ? ` ｜ 排版 1:${layoutSizeRatio} → ${format(layoutReferenceCm, 4)} cm` : ''}</span>{!isColoc && <span>线长：{scanLine ? `${format(lineLength, 1)} px${pixelSize ? ` / ${format(lineLength * pixelSize, 2)} µm` : ''}` : '—'}</span>}<span>{isColoc ? `BG A/B：${format(background.a, 2)} / ${format(background.b, 2)}` : `定量背景：${backgroundLabels[backgroundMethod]}`}</span></div>
-          <div className="roi-export-panel"><div><strong>{roi ? isColoc ? `ROI ${Math.round(roi.width)} × ${Math.round(roi.height)} px` : `裁剪边长 ${roiSideLabel(roi.width, pixelSize, roiSizeUnit)}` : `先框选${isColoc ? '分析 ROI' : '正方形'}`}</strong><small>图片为伪彩；定量用 CSV / JSON。</small></div><div className="export-actions"><button disabled={!roi || !channelConfirmed} onClick={() => { void exportRoiImage('png'); }}>PNG</button><button disabled={!roi || !channelConfirmed} onClick={() => { void exportRoiImage('jpg'); }}>JPG</button><button disabled={!roi || !channelConfirmed} onClick={() => { void exportRoiImage('tiff'); }}>TIFF</button></div></div>
+          <div className="roi-export-panel"><div><strong>{roi ? isColoc ? `ROI ${Math.round(roi.width)} × ${Math.round(roi.height)} px` : `裁剪边长 ${roiSideLabel(roi.width, pixelSize, roiSizeUnit)}` : `先框选${isColoc ? '分析 ROI' : '正方形'}`}</strong><small>{!isColoc && intensityExportTarget === 'all' ? `批量：Merge + ${intensityChannels.length} 个已勾选单通道，装入一个 ZIP。` : '图片为伪彩；定量用 CSV / JSON。'}{showScaleBar ? ' 比例尺会写入图片。' : ''}</small></div><div className="roi-export-controls">{!isColoc && <select aria-label="导出内容" value={intensityExportTarget} disabled={!image || Boolean(exportingRoi)} onChange={event => { const target = event.target.value as IntensityExportTarget; setIntensityExportTarget(target); setView(target.startsWith('channel:') ? target as `channel:${string}` : 'overlay'); }}><option value="merge">Merge（已勾选通道）</option>{intensityChannels.map(({ channel, setting }) => <option key={channel.id} value={`channel:${channel.id}`}>{setting.label || channel.label}</option>)}<option value="all">全部：Merge + 单通道（ZIP）</option></select>}<div className="export-actions"><button disabled={!roi || !channelConfirmed || Boolean(exportingRoi)} onClick={() => { void exportRoiImage('png'); }}>{exportingRoi === 'png' ? '处理中…' : 'PNG'}</button><button disabled={!roi || !channelConfirmed || Boolean(exportingRoi)} onClick={() => { void exportRoiImage('jpg'); }}>{exportingRoi === 'jpg' ? '处理中…' : 'JPG'}</button><button disabled={!roi || !channelConfirmed || Boolean(exportingRoi)} onClick={() => { void exportRoiImage('tiff'); }}>{exportingRoi === 'tiff' ? '处理中…' : 'TIFF'}</button></div></div></div>
         </div>
 
         <aside className="results-panel">

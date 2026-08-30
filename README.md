@@ -30,7 +30,7 @@ OIR 直接读取当前限定为单文件、未压缩的 FV3000 数据，单文�
 - Pearson（无阈值/阈值下/阈值上）、M1/M2、tM1/tM2、Manders overlap、Li ICQ
 - ROI 强度：像素数、Mean、Median、sample SD、Min/Max、RawIntDen、背景均值/SD、Corrected Mean、CTCF、饱和比例
 - 线扫描：每 1 px 双线性采样、指定线宽内 mean ± sample SD、可选 Gaussian 派生曲线
-- 指标 CSV、线扫 CSV、完整 JSON，以及原始 ROI 尺寸的 PNG/JPG/8-bit RGB 伪彩 TIFF 裁切图
+- 指标 CSV、线扫 CSV、完整 JSON，以及原始 ROI 尺寸的 PNG/JPG/8-bit RGB 伪彩 TIFF 裁切图；可选 Merge 或任一已勾选单通道，也可将 Merge + 全部已勾选单通道一次打包为 ZIP
 
 ## 使用
 
@@ -38,7 +38,7 @@ OIR 直接读取当前限定为单文件、未压缩的 FV3000 数据，单文�
 2. 直接上传一个 `.oir`、二维 OME-TIFF，或同时选择多份同尺寸分通道 TIFF。
 3. 核对自动读取的名称与 Olympus 伪彩并点击“确认通道”；随后选择 A/B 或勾选强度通道。需要时用直方图、ImageJ、自动或手动 Min/Max 调整显示。
 4. 强度页可拖动四角缩放正方形、在框内拖动位置，也可直接输入实际边长（µm、mm、cm 或 px）；有标定的 OIR 默认显示 µm。可用“实际 : 排版 = 1 : N”换算排版参考尺寸，不改变 ROI、定量或导出像素；勾选固定后只移动。显示去杂色只影响预览和图片导出，定量扣背景仍单独设置。
-5. 运行分析并检查质控；导出 CSV/JSON，或直接导出当前裁剪区的 PNG、JPG、TIFF。
+5. 运行分析并检查质控；导出 CSV/JSON。裁剪图可选择 Merge、某个单通道或“全部”；“全部”会把 Merge 与所有已勾选单通道按所选格式装入一个 ZIP，每张图使用相同 ROI、伪彩、显示设置和比例尺。
 
 JPEG、截图和社交平台图片经过有损或 8-bit 转换，只适合探索性分析。跨样本强度比较必须保持曝光、增益、激光功率、探测器设置及位深一致。
 
