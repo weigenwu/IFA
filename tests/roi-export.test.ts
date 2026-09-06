@@ -30,6 +30,22 @@ const image = (width: number, height: number, channels: ChannelData[]): LoadedIm
   warnings: [],
 });
 
+test('no selection exports the full image at source resolution with unchanged data', async () => {
+  const values = [0, 64, 128, 255, 32, 96];
+  const source = image(3, 2, [channel('a', values)]);
+  const rendered = renderRoiPseudocolor({
+    image: source, channels: [{ id: 'a', color: 'red', displayMin: 0, displayMax: 255 }],
+    roi: null,
+  });
+  assert.deepEqual(rendered.sourceRoi, { x: 0, y: 0, width: 3, height: 2 });
+  assert.deepEqual(Array.from(rendered.rgb), values.flatMap(value => [value, 0, 0]));
+  const tiff = await fromArrayBuffer(await encodePseudocolorTiff(rendered));
+  const page = await tiff.getImage();
+  assert.equal(page.getWidth(), 3);
+  assert.equal(page.getHeight(), 2);
+  assert.deepEqual(Array.from(source.channels[0].data), values);
+});
+
 test('ROI render returns the exact clamped source rectangle at original resolution', () => {
   const source = image(4, 3, [channel('a', Array.from({ length: 12 }, (_, index) => index))]);
   const rendered = renderRoiPseudocolor({
