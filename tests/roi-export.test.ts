@@ -169,6 +169,27 @@ test('Merge and every single-channel export share the exact ROI and scale bar', 
   assert.deepEqual(Array.from(greenOnly.rgb.slice(0, 6)), [0, 0, 0, 0, 255, 0]);
 });
 
+test('679px crop exports a solid 100px ruler line and 20um label with reference parameters', async () => {
+  const source = image(679, 679, [channel('a', new Array(679 * 679).fill(0))]);
+  const rendered = renderRoiPseudocolor({ image: source, channels: [{ id: 'a', color: 'blue' }], pixelSizeUm: 0.2, scaleBarUm: 20 });
+  assert.equal(source.pixelSizeUm, null, 'display reference must not calibrate source data');
+  assert.equal(rendered.scaleBar?.label, '20 µm');
+  assert.equal(rendered.scaleBar?.pixelLength, 100);
+  assert.equal(rendered.scaleBar?.rendered, true);
+  const tiff = await fromArrayBuffer(await encodePseudocolorTiff(rendered));
+  const decoded = await (await tiff.getImage()).readRasters({ interleave: true });
+  // 20px margin, 6px-thick line. Verify the entire line, not just label pixels.
+  for (let y = 653; y < 659; y++) {
+    for (let x = 559; x < 659; x++) {
+      const offset = (y * 679 + x) * 3;
+      assert.deepEqual(Array.from(decoded.slice(offset, offset + 3)), [255, 255, 255]);
+    }
+  }
+  const tooShort = renderRoiPseudocolor({ image: source, channels: [{ id: 'a', color: 'blue' }], pixelSizeUm: 20, scaleBarUm: 20 });
+  assert.equal(tooShort.scaleBar?.rendered, false);
+  assert.equal(tooShort.rgb.some(value => value > 0), false, 'never emit a label without a visible line');
+});
+
 test('TIFF encoder writes readable interleaved 8-bit RGB and identifies pseudocolor data', async () => {
   const rendered = {
     rgb: new Uint8Array([

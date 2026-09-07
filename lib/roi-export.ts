@@ -181,10 +181,11 @@ function drawScaleBar(rgb: Uint8Array, width: number, height: number, pixelSizeU
 
   const pixelLength = Math.max(1, Math.round(scaleBarUm / pixelSizeUm));
   const label = scaleBarLabel(scaleBarUm);
+  if (pixelLength < 3) return { rendered: false, label, requestedUm: scaleBarUm, pixelLength, reason: '横线不足 3 px，请增大标尺长度；不要改变真实标定来拉长横线。' };
   const margin = Math.max(3, Math.round(Math.min(width, height) * 0.03));
   const scale = Math.max(1, Math.min(12, Math.round(Math.min(width, height) / 230)));
   const textWidth = Math.max(0, label.length * 6 * scale - scale);
-  const barThickness = Math.max(2, scale);
+  const barThickness = Math.max(3, scale * 2);
   const requiredWidth = Math.max(pixelLength, textWidth);
   const requiredHeight = 7 * scale + 2 * scale + barThickness;
 

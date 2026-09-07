@@ -116,12 +116,6 @@ function initialChannelSettings(image: LoadedImage): ChannelSetting[] {
   });
 }
 
-function suggestedScaleBarUm(width: number, pixelSizeUm: number) {
-  if (!(pixelSizeUm > 0)) return 20;
-  const target = width * pixelSizeUm * 0.22;
-  const choices = [0.5, 1, 2, 5, 10, 20, 50, 100, 200, 500, 1000];
-  return choices.filter(value => value <= target).at(-1) ?? choices[0];
-}
 
 const format = (value: number, digits = 3) => {
   if (!Number.isFinite(value)) return 'NA';
@@ -207,6 +201,9 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   const [displayBlackPoint, setDisplayBlackPoint] = useState(0);
   const [suppressDisplayBackground, setSuppressDisplayBackground] = useState(false);
   const [showScaleBar, setShowScaleBar] = useState(true);
+  const [useReferenceScale, setUseReferenceScale] = useState(false);
+  const [referencePixelSize, setReferencePixelSize] = useState(0.2);
+  const rulerPixelSize = pixelSize > 0 ? pixelSize : useReferenceScale ? referencePixelSize : 0;
   const [scaleBarUm, setScaleBarUm] = useState(20);
   const [layoutSizeRatio, setLayoutSizeRatio] = useState(1000);
   const [roiSizeUnit, setRoiSizeUnit] = useState<RoiSizeUnit>('px');
@@ -309,8 +306,9 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       setChannelAId(green.id); setChannelBId(red.id);
       setRoi(null); setBackgroundRoi(null); setScanLine(null); setView('overlay'); setIntensityExportTarget('merge'); setTool('roi');
       const loadedPixelSize = loaded.pixelSizeUm ?? 0;
-      setPixelSize(loadedPixelSize); setScaleBarUm(suggestedScaleBarUm(loaded.width, loadedPixelSize));
-      setDisplayBlackPoint(0); setSuppressDisplayBackground(false); setShowScaleBar(loadedPixelSize > 0); setAllowDisplayOnly(false);
+      setPixelSize(loadedPixelSize); setScaleBarUm(20);
+      setDisplayBlackPoint(0); setSuppressDisplayBackground(false); setShowScaleBar(true); setAllowDisplayOnly(false);
+      setUseReferenceScale(false); setReferencePixelSize(0.2);
       setRoiSizeUnit(loadedPixelSize > 0 ? 'um' : 'px'); setSquareSizeLocked(false); setRoiTargetSidePx(Math.min(256, loaded.width, loaded.height)); setRoiMoveOffset(null); setRoiResize(null);
     } catch (problem) {
       setImage(null);
@@ -389,8 +387,8 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     const roiLabel = !isColoc && roi ? `边长 ${roiSideLabel(roi.width, pixelSize, roiSizeUnit)}` : 'ROI';
     drawRect(roi, COLORS.cyan, roiLabel); drawRect(backgroundRoi, COLORS.magenta, 'BG'); drawLine(scanLine);
     if (!isColoc && tool === 'roi' && roi && !squareSizeLocked) drawRoiHandles(roi);
-    if (showScaleBar && pixelSize > 0 && scaleBarUm > 0) {
-      const barPixels = scaleBarUm / pixelSize * sx;
+    if (showScaleBar && rulerPixelSize > 0) {
+      const barPixels = scaleBarUm / rulerPixelSize * sx;
       if (barPixels > 2 && barPixels < canvas.width * .8) {
         const endX = canvas.width - 20, y = canvas.height - 22, startX = endX - barPixels;
         context.strokeStyle = 'rgba(0,0,0,.7)'; context.lineWidth = 7; context.beginPath(); context.moveTo(startX, y); context.lineTo(endX, y); context.stroke();
@@ -402,7 +400,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       if ('width' in draft) drawRect(draft, tool === 'background' ? COLORS.magenta : '#ffffff', tool === 'background' ? 'BG' : 'ROI');
       else drawLine(draft);
     }
-  }, [image, previewSize, roi, backgroundRoi, scanLine, draft, tool, lineWidth, showScaleBar, pixelSize, scaleBarUm, isColoc, squareSizeLocked, roiSizeUnit]);
+  }, [image, previewSize, roi, backgroundRoi, scanLine, draft, tool, lineWidth, showScaleBar, pixelSize, scaleBarUm, rulerPixelSize, isColoc, squareSizeLocked, roiSizeUnit]);
 
   useEffect(() => {
     const canvas = scatterCanvas.current;
@@ -705,7 +703,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       channels: mode === 'colocalization'
         ? { a: { id: channelA.id, sourceLabel: channelA.label, label: channelALabel, sourceColor: channelA.sourceColor, bitDepth: channelA.bitDepth }, b: { id: channelB.id, sourceLabel: channelB.label, label: channelBLabel, sourceColor: channelB.sourceColor, bitDepth: channelB.bitDepth } }
         : intensityChannels.map(({ channel, setting }) => ({ id: channel.id, sourceLabel: channel.label, label: setting.label || channel.label, sourceColor: channel.sourceColor, bitDepth: channel.bitDepth, displayColor: setting.color })),
-      parameters: { roi, backgroundRoi, backgroundMethod, background: mode === 'colocalization' ? background : Object.fromEntries(intensityChannels.map(({ channel }) => [channel.id, backgroundByChannel.get(channel.id) ?? { mean: 0, sd: 0 }])), thresholdMethod, manualThresholdPercent: { a: manualA, b: manualB }, displayColors: mode === 'colocalization' ? { a: displayColorA, b: displayColorB } : Object.fromEntries(intensityChannels.map(({ channel, setting }) => [channel.id, setting.color])), displayRanges: Object.fromEntries(channelSettings.map(setting => [setting.id, { min: setting.displayMin, max: setting.displayMax, preset: setting.displayPreset }])), displayBlackPointPercent: displayBlackPoint, displayBackgroundSuppression: { enabled: Boolean(suppressDisplayBackground && backgroundRoi), method: `background_roi_mean_plus_${DISPLAY_BACKGROUND_SD_MULTIPLIER}sd`, channels: Object.fromEntries(displayBackgroundByChannel) }, scaleBar: { shown: showScaleBar, lengthUm: scaleBarUm }, scanLine, lineChannels: { a: channelA.id, b: channelB.id }, lineWidthPx: lineWidth, gaussianSigmaPx: sigma, pixelSizeUm: pixelSize || null, comparison: 'strict >', costesSignificanceTest: false },
+      parameters: { roi, backgroundRoi, backgroundMethod, background: mode === 'colocalization' ? background : Object.fromEntries(intensityChannels.map(({ channel }) => [channel.id, backgroundByChannel.get(channel.id) ?? { mean: 0, sd: 0 }])), thresholdMethod, manualThresholdPercent: { a: manualA, b: manualB }, displayColors: mode === 'colocalization' ? { a: displayColorA, b: displayColorB } : Object.fromEntries(intensityChannels.map(({ channel, setting }) => [channel.id, setting.color])), displayRanges: Object.fromEntries(channelSettings.map(setting => [setting.id, { min: setting.displayMin, max: setting.displayMax, preset: setting.displayPreset }])), displayBlackPointPercent: displayBlackPoint, displayBackgroundSuppression: { enabled: Boolean(suppressDisplayBackground && backgroundRoi), method: `background_roi_mean_plus_${DISPLAY_BACKGROUND_SD_MULTIPLIER}sd`, channels: Object.fromEntries(displayBackgroundByChannel) }, scaleBar: { shown: showScaleBar, lengthUm: scaleBarUm, mode: pixelSize > 0 ? 'calibrated' : useReferenceScale ? 'reference-unverified' : 'uncalibrated', displayPixelSizeUm: rulerPixelSize || null }, scanLine, lineChannels: { a: channelA.id, b: channelB.id }, lineWidthPx: lineWidth, gaussianSigmaPx: sigma, pixelSizeUm: pixelSize || null, comparison: 'strict >', costesSignificanceTest: false },
       results: mode === 'colocalization' ? { colocalization: analysis.coloc } : { intensities: analysis.intensities, lineProfile: analysis.profile },
       warnings: [...image.warnings, ...(image.displayOnly ? ['本结果由展示图风险确认后生成，仅供探索。'] : []), ...(analysis.coloc?.warnings ?? []), ...(mode === 'colocalization' ? ['共定位不等于分子相互作用。'] : [])],
     };
@@ -716,7 +714,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     if (!image || !channelA || !channelB) { setError('请先导入图片。'); return; }
     if (!channelConfirmed) { setError('请先确认通道名称和伪彩。'); return; }
     if (!isColoc && !intensityChannels.length) { setError('请至少勾选 1 个要显示和导出的通道。'); return; }
-    if (showScaleBar && !(pixelSize > 0)) { setError('要显示比例尺，请先填写像素尺寸（µm/px）；也可以取消“导出显示比例尺”。'); return; }
+    if (showScaleBar && !(rulerPixelSize > 0)) { setError('请填写真实像素尺寸，或点击标尺设置中的“使用参考默认值”。'); return; }
     if (exportingRoi) return;
     setExportingRoi(format);
     try {
@@ -749,7 +747,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
           roi,
           view: job.view,
           blackPointPercent: displayBlackPoint,
-          pixelSizeUm: showScaleBar ? pixelSize : null,
+          pixelSizeUm: showScaleBar ? rulerPixelSize : null,
           scaleBarUm: showScaleBar ? scaleBarUm : null,
           mask: job.view === 'mask' && analysis?.coloc ? { channelAId: channelA.id, channelBId: channelB.id, thresholdA: analysis.coloc.thresholdA, thresholdB: analysis.coloc.thresholdB, backgroundA: background.a, backgroundB: background.b } : null,
         });
@@ -796,6 +794,14 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   const roiSideMax = image ? roiSideInUnit(Math.min(image.width, image.height), pixelSize, roiSizeUnit) : 1;
   const roiSideStep = roiSideMin;
   const layoutReferenceCm = roi && pixelSize > 0 ? roi.width * pixelSize * layoutSizeRatio / 10000 : null;
+
+  const referenceScaleControls = !(pixelSize > 0) && (
+    <div className="field-help">
+      <button type="button" onClick={() => { setUseReferenceScale(true); setReferencePixelSize(0.2); setScaleBarUm(20); setShowScaleBar(true); setError(''); }}>使用参考默认值</button>
+      {useReferenceScale && <label className="number-field"><span>参考参数</span><input aria-label="标尺参考像素尺寸" type="number" min="0.000001" step="0.001" value={referencePixelSize} onChange={event => setReferencePixelSize(Math.max(0.000001, Number(event.target.value) || 0.2))} /><span>µm/px</span></label>}
+      <small>参考默认值 0.2 µm/px：20 µm 画为 100 px。仅示意，非仪器标定；不参与测量，说明不写入图片。</small>
+    </div>
+  );
 
   return (
     <main className="app-shell" id="top">
@@ -854,13 +860,13 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
           <div className="field-group"><p>显示去杂色</p><label className="scale-toggle"><input type="checkbox" checked={suppressDisplayBackground} disabled={!image || !backgroundRoi} onChange={event => setSuppressDisplayBackground(event.target.checked)} /><span>背景 ROI 均值 + {DISPLAY_BACKGROUND_SD_MULTIPLIER} SD</span></label><small className="field-help">{backgroundRoi ? '仅改变显示和图片导出。' : '先在图中框选背景 ROI。'}</small></div>
 
           {!isColoc && <>
-            <div className="field-group"><p>正方形裁剪与标尺</p>{image && <div className="crop-size-field"><span>实际边长</span><input aria-label="裁剪边长" type="number" min={roiSideMin} max={roiSideMax} step={roiSideStep} value={roiSideValue} onChange={event => setSquareRoiSide(Number(event.target.value))} /><select aria-label="裁剪边长单位" value={roiSizeUnit} onChange={event => setRoiSizeUnit(event.target.value as RoiSizeUnit)}><option value="px">px</option><option value="um" disabled={!pixelSize}>µm</option><option value="mm" disabled={!pixelSize}>mm</option><option value="cm" disabled={!pixelSize}>cm</option></select></div>}<label className="scale-toggle"><input type="checkbox" checked={squareSizeLocked} onChange={event => { setSquareSizeLocked(event.target.checked); setRoiResize(null); }} /><span>固定边长（仅移动）</span></label><small className="field-help">{squareSizeLocked ? '已固定；框内拖动可移动位置。' : '拖四角缩放，框内拖动移动；输入实际边长可精确设置。'}</small><label className="number-field"><span>排版比例</span><input aria-label="排版比例分母" type="number" min="1" max="100000" step="100" value={layoutSizeRatio} onChange={event => setLayoutSizeRatio(Math.min(100000, Math.max(1, Math.round(Number(event.target.value) || 1))))} /><span>倍</span></label><small className="field-help">实际 : 排版 = 1 : {layoutSizeRatio}{layoutReferenceCm !== null ? ` → ${format(layoutReferenceCm, 4)} cm` : ''}；仅换算，不改变 ROI、定量或导出像素。</small><label className="number-field"><span>像素尺寸</span><input type="number" min="0" step="0.001" value={pixelSize} onChange={event => { const value = Math.max(0, Number(event.target.value) || 0); setPixelSize(value); if (!value) setRoiSizeUnit('px'); }} /><span>µm/px</span></label><label className="scale-toggle"><input type="checkbox" checked={showScaleBar} onChange={event => setShowScaleBar(event.target.checked)} /><span>导出显示比例尺</span></label>{showScaleBar && <label className="number-field"><span>比例尺</span><input type="number" min="0.1" step="0.1" value={scaleBarUm} onChange={event => setScaleBarUm(Math.max(.1, Number(event.target.value) || .1))} /><span>µm</span></label>}</div>
+            <div className="field-group"><p>正方形裁剪与标尺</p>{image && <div className="crop-size-field"><span>实际边长</span><input aria-label="裁剪边长" type="number" min={roiSideMin} max={roiSideMax} step={roiSideStep} value={roiSideValue} onChange={event => setSquareRoiSide(Number(event.target.value))} /><select aria-label="裁剪边长单位" value={roiSizeUnit} onChange={event => setRoiSizeUnit(event.target.value as RoiSizeUnit)}><option value="px">px</option><option value="um" disabled={!pixelSize}>µm</option><option value="mm" disabled={!pixelSize}>mm</option><option value="cm" disabled={!pixelSize}>cm</option></select></div>}<label className="scale-toggle"><input type="checkbox" checked={squareSizeLocked} onChange={event => { setSquareSizeLocked(event.target.checked); setRoiResize(null); }} /><span>固定边长（仅移动）</span></label><small className="field-help">{squareSizeLocked ? '已固定；框内拖动可移动位置。' : '拖四角缩放，框内拖动移动；输入实际边长可精确设置。'}</small><label className="number-field"><span>排版比例</span><input aria-label="排版比例分母" type="number" min="1" max="100000" step="100" value={layoutSizeRatio} onChange={event => setLayoutSizeRatio(Math.min(100000, Math.max(1, Math.round(Number(event.target.value) || 1))))} /><span>倍</span></label><small className="field-help">实际 : 排版 = 1 : {layoutSizeRatio}{layoutReferenceCm !== null ? ` → ${format(layoutReferenceCm, 4)} cm` : ''}；仅换算，不改变 ROI、定量或导出像素。</small><label className="number-field"><span>像素尺寸</span><input type="number" min="0" step="0.001" value={pixelSize} onChange={event => { const value = Math.max(0, Number(event.target.value) || 0); setPixelSize(value); if (!value) setRoiSizeUnit('px'); }} /><span>µm/px</span></label>{referenceScaleControls}<label className="scale-toggle"><input type="checkbox" checked={showScaleBar} onChange={event => setShowScaleBar(event.target.checked)} /><span>导出显示比例尺</span></label>{showScaleBar && <label className="number-field"><span>比例尺</span><input type="number" min="0.1" step="0.1" value={scaleBarUm} onChange={event => setScaleBarUm(Math.max(.1, Number(event.target.value) || .1))} /><span>µm</span></label>}</div>
             <div className="field-group"><p>线扫描通道（可选）</p><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorA].css }} />通道 A<select value={channelAId} onChange={event => setChannelAId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{channelSettings.find(setting => setting.id === channel.id)?.label || channel.label}</option>)}</select></label><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorB].css }} />通道 B<select value={channelBId} onChange={event => setChannelBId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{channelSettings.find(setting => setting.id === channel.id)?.label || channel.label}</option>)}</select></label></div>
           </>}
 
           {isColoc && <div className="field-group"><p>阈值</p><label className="wide-field">方法<select value={thresholdMethod} onChange={event => setThresholdMethod(event.target.value as ThresholdMethod)}><option value="costes">Costes 自动</option><option value="otsu">Otsu 自动</option><option value="manual">手动阈值</option><option value="none">零阈值</option></select></label>{thresholdMethod === 'manual' && <div className="range-pair"><label>A {manualA}%<input type="range" min="0" max="100" value={manualA} onChange={event => setManualA(Number(event.target.value))} /></label><label>B {manualB}%<input type="range" min="0" max="100" value={manualB} onChange={event => setManualB(Number(event.target.value))} /></label></div>}</div>}
 
-          <div className="field-group"><p>{isColoc ? '背景与标尺' : '定量扣背景'}</p><label className="wide-field">方法<select value={backgroundMethod} onChange={event => setBackgroundMethod(event.target.value as BackgroundMethod)}><option value="none">不校正</option><option value="roi">背景 ROI 均值</option><option value="percentile">ROI 第 5 百分位</option></select></label>{isColoc && <><label className="number-field"><span>像素尺寸</span><input type="number" min="0" step="0.001" value={pixelSize} onChange={event => setPixelSize(Math.max(0, Number(event.target.value) || 0))} /><span>µm/px</span></label><label className="scale-toggle"><input type="checkbox" checked={showScaleBar} onChange={event => setShowScaleBar(event.target.checked)} /><span>导出比例尺</span></label>{showScaleBar && <label className="number-field"><span>比例尺</span><input type="number" min="0.1" step="0.1" value={scaleBarUm} onChange={event => setScaleBarUm(Math.max(.1, Number(event.target.value) || .1))} /><span>µm</span></label>}</>}<small className="field-help">{isColoc ? '背景用于计算，标尺用于导图。' : '用于数值计算，与显示去杂色分开。'}</small></div>
+          <div className="field-group"><p>{isColoc ? '背景与标尺' : '定量扣背景'}</p><label className="wide-field">方法<select value={backgroundMethod} onChange={event => setBackgroundMethod(event.target.value as BackgroundMethod)}><option value="none">不校正</option><option value="roi">背景 ROI 均值</option><option value="percentile">ROI 第 5 百分位</option></select></label>{isColoc && <><label className="number-field"><span>像素尺寸</span><input type="number" min="0" step="0.001" value={pixelSize} onChange={event => setPixelSize(Math.max(0, Number(event.target.value) || 0))} /><span>µm/px</span></label>{referenceScaleControls}<label className="scale-toggle"><input type="checkbox" checked={showScaleBar} onChange={event => setShowScaleBar(event.target.checked)} /><span>导出比例尺</span></label>{showScaleBar && <label className="number-field"><span>比例尺</span><input type="number" min="0.1" step="0.1" value={scaleBarUm} onChange={event => setScaleBarUm(Math.max(.1, Number(event.target.value) || .1))} /><span>µm</span></label>}</>}<small className="field-help">{isColoc ? '背景用于计算，标尺用于导图。' : '用于数值计算，与显示去杂色分开。'}</small></div>
           {image?.displayOnly && <label className="risk-confirm"><input type="checkbox" checked={allowDisplayOnly} onChange={event => setAllowDisplayOnly(event.target.checked)} /><span><b>当前是展示图</b>仅在理解伪彩/合并 RGB 风险后进行探索性分析。</span></label>}
           </>}
         </aside>
