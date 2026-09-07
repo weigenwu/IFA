@@ -137,6 +137,7 @@ test('optional scale bar is drawn at its requested pixel length with a label', (
     scaleBarUm: 2,
   });
   assert.deepEqual(rendered.scaleBar, { rendered: true, label: '2 µm', requestedUm: 2, pixelLength: 20 });
+  assert.equal(rendered.hasVisibleSignal, false, 'a scale bar must not hide a blank image');
   let whitePixels = 0;
   for (let offset = 0; offset < rendered.rgb.length; offset += 3) {
     if (rendered.rgb[offset] === 255 && rendered.rgb[offset + 1] === 255 && rendered.rgb[offset + 2] === 255) whitePixels++;

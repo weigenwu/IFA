@@ -206,6 +206,7 @@ async function loadTiff(file: File, buffer: ArrayBuffer): Promise<LoadedImage> {
   else if (!ome && photometric === 2) warnings.push('检测到多色 RGB TIFF，可能是合并展示图；请勿把 RGB 分量当作原始染料通道。');
   if (ome) warnings.push(`已读取 OME 元数据：${ome.sizeC} 通道，Z=${ome.sizeZ}，T=${ome.sizeT}。`);
   if (ome?.pixelSizeWarning) warnings.push(ome.pixelSizeWarning);
+  if (!ome?.pixelSizeUm) warnings.push('未读取到显微镜像素尺寸。DPI 不能代替标定；添加 µm 比例尺前请填写像素尺寸（µm/px）。');
   if (finalChannels.some(channel => channel.bitDepth > 8)) warnings.push('分析使用 TIFF 原始位深；显示预览单独缩放，不改变数值。');
   return {
     fileName: file.name,

@@ -162,7 +162,8 @@ function saveBlob(name: string, blob: Blob) {
   const url = URL.createObjectURL(blob);
   const link = document.createElement('a');
   link.href = url; link.download = name; document.body.appendChild(link); link.click(); link.remove();
-  setTimeout(() => URL.revokeObjectURL(url), 0);
+  // Allow the browser to finish starting the download before releasing its data.
+  setTimeout(() => URL.revokeObjectURL(url), 60_000);
 }
 
 function normalizedRect(rect: Rect | null) {
@@ -309,7 +310,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       setRoi(null); setBackgroundRoi(null); setScanLine(null); setView('overlay'); setIntensityExportTarget('merge'); setTool('roi');
       const loadedPixelSize = loaded.pixelSizeUm ?? 0;
       setPixelSize(loadedPixelSize); setScaleBarUm(suggestedScaleBarUm(loaded.width, loadedPixelSize));
-      setDisplayBlackPoint(0); setSuppressDisplayBackground(false); setShowScaleBar(true); setAllowDisplayOnly(false);
+      setDisplayBlackPoint(0); setSuppressDisplayBackground(false); setShowScaleBar(loadedPixelSize > 0); setAllowDisplayOnly(false);
       setRoiSizeUnit(loadedPixelSize > 0 ? 'um' : 'px'); setSquareSizeLocked(false); setRoiTargetSidePx(Math.min(256, loaded.width, loaded.height)); setRoiMoveOffset(null); setRoiResize(null);
     } catch (problem) {
       setImage(null);
@@ -738,6 +739,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       const extension = format === 'tiff' ? 'tif' : format;
       const mime = format === 'tiff' ? 'image/tiff' : format === 'jpg' ? 'image/jpeg' : 'image/png';
       const archiveEntries: Array<{ name: string; data: ArrayBuffer }> = [];
+      const blankViews: string[] = [];
       let baseName = '';
 
       for (const job of jobs) {
@@ -751,6 +753,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
           scaleBarUm: showScaleBar ? scaleBarUm : null,
           mask: job.view === 'mask' && analysis?.coloc ? { channelAId: channelA.id, channelBId: channelB.id, thresholdA: analysis.coloc.thresholdA, thresholdB: analysis.coloc.thresholdB, backgroundA: background.a, backgroundB: background.b } : null,
         });
+        if (!rendered.hasVisibleSignal) blankViews.push(job.suffix);
         if (showScaleBar && !rendered.scaleBar?.rendered) throw new Error(`${rendered.scaleBar?.reason ?? '比例尺无法显示。'}请增大裁剪框或缩短比例尺后再导出。`);
         if (!baseName) {
           const source = rendered.sourceRoi;
@@ -768,6 +771,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       } else {
         saveBlob(archiveEntries[0].name, new Blob([archiveEntries[0].data], { type: mime }));
       }
+      if (blankViews.length) setError(`已导出，但以下视图在当前选区及显示设置下全黑：${blankViews.join('、')}。请检查选区、导出通道，或降低 Min / 黑场并关闭显示去杂色后重试。`);
     } catch (problem) { setError(problem instanceof Error ? problem.message : 'ROI 图片导出失败。'); }
     finally { setExportingRoi(null); }
   };

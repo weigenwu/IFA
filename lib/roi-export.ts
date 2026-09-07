@@ -58,6 +58,8 @@ export interface RenderedRoi {
   sourceRoi: { x: number; y: number; width: number; height: number };
   blackPointPercent: number;
   scaleBar: RenderedScaleBar | null;
+  /** Image signal only, excluding any scale bar pixels. */
+  hasVisibleSignal?: boolean;
 }
 
 export const ROI_TIFF_DESCRIPTION = 'FluoroScope ROI export; 8-bit RGB pseudocolor rendering; not raw quantitative fluorescence data.';
@@ -262,6 +264,7 @@ export function renderRoiPseudocolor(options: RenderRoiOptions): RenderedRoi {
     }
   }
 
+  const hasVisibleSignal = rgb.some(value => value > 0);
   const scaleBar = drawScaleBar(rgb, width, height, pixelSizeUm, scaleBarUm);
   return {
     rgb,
@@ -270,6 +273,7 @@ export function renderRoiPseudocolor(options: RenderRoiOptions): RenderedRoi {
     sourceRoi: { x: bounds.x0, y: bounds.y0, width, height },
     blackPointPercent,
     scaleBar,
+    hasVisibleSignal,
   };
 }
 
