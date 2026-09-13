@@ -82,6 +82,13 @@ export function fitSquareRoi(width: number, height: number, x: number, y: number
   };
 }
 
+export function resizeSquareAtCenter(width: number, height: number, roi: Rect | null, side: number): Rect {
+  const fittedSide = clamp(Math.round(side), 1, Math.min(width, height));
+  const centerX = roi ? roi.x + roi.width / 2 : width / 2;
+  const centerY = roi ? roi.y + roi.height / 2 : height / 2;
+  return fitSquareRoi(width, height, centerX - fittedSide / 2, centerY - fittedSide / 2, fittedSide);
+}
+
 export function resizeSquareFromAnchor(width: number, height: number, anchor: { x: number; y: number }, point: { x: number; y: number }, directionX: -1 | 1, directionY: -1 | 1): Rect {
   const availableX = directionX < 0 ? anchor.x : width - anchor.x;
   const availableY = directionY < 0 ? anchor.y : height - anchor.y;

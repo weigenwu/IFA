@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { calculateColocalization, displayWindow, fitSquareRoi, intensityStats, lineProfile, resizeSquareFromAnchor, type ChannelData } from '../lib/analysis.ts';
+import { calculateColocalization, displayWindow, fitSquareRoi, intensityStats, lineProfile, resizeSquareAtCenter, resizeSquareFromAnchor, type ChannelData } from '../lib/analysis.ts';
 import { collapsePseudocolor } from '../lib/image.ts';
 import { parseOir } from '../lib/oir.ts';
 
@@ -84,6 +84,17 @@ test('square ROI corner resize keeps its opposite corner and stays inside the im
   assert.deepEqual(resizeSquareFromAnchor(100, 80, { x: 20, y: 10 }, { x: 55, y: 60 }, 1, 1), { x: 20, y: 10, width: 50, height: 50 });
   assert.deepEqual(resizeSquareFromAnchor(100, 80, { x: 90, y: 70 }, { x: -50, y: -50 }, -1, -1), { x: 20, y: 0, width: 70, height: 70 });
   assert.deepEqual(resizeSquareFromAnchor(100, 80, { x: 50, y: 40 }, { x: 70, y: 60 }, -1, -1), { x: 49, y: 39, width: 1, height: 1 });
+});
+
+test('typed square side preserves center, rounds to pixels and fits image limits', () => {
+  const roi = { x: 300, y: 400, width: 248, height: 248 };
+  assert.deepEqual(resizeSquareAtCenter(1024, 1024, roi, 50 / 0.2), { x: 299, y: 399, width: 250, height: 250 });
+  assert.deepEqual(resizeSquareAtCenter(1024, 1024, roi, 100), { x: 374, y: 474, width: 100, height: 100 });
+  assert.deepEqual(resizeSquareAtCenter(1024, 1024, roi, 248.2), roi);
+  assert.deepEqual(resizeSquareAtCenter(100, 80, null, 20), { x: 40, y: 30, width: 20, height: 20 });
+  assert.deepEqual(resizeSquareAtCenter(100, 80, { x: 80, y: 60, width: 20, height: 20 }, 50), { x: 50, y: 30, width: 50, height: 50 });
+  assert.deepEqual(resizeSquareAtCenter(100, 80, null, 5000), { x: 10, y: 0, width: 80, height: 80 });
+  assert.equal(resizeSquareAtCenter(100, 80, null, 0.1).width, 1);
 });
 
 test('display presets preserve raw detector range and provide clipped preview windows', () => {

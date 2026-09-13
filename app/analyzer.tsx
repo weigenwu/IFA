@@ -9,6 +9,7 @@ import {
   intensityStats,
   lineProfile,
   percentileInRoi,
+  resizeSquareAtCenter,
   resizeSquareFromAnchor,
   scatterSample,
   type ColocResult,
@@ -603,11 +604,10 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     if (!image || !Number.isFinite(value)) return;
     const sidePx = roiSizeUnit === 'px' ? value : value * MICRONS_PER_UNIT[roiSizeUnit] / pixelSize;
     if (!Number.isFinite(sidePx) || sidePx <= 0) return;
-    const centerX = roi ? roi.x + roi.width / 2 : image.width / 2;
-    const centerY = roi ? roi.y + roi.height / 2 : image.height / 2;
-    const fitted = fitSquareRoi(image.width, image.height, centerX - sidePx / 2, centerY - sidePx / 2, sidePx);
+    const fitted = resizeSquareAtCenter(image.width, image.height, roi, sidePx);
     setRoiTargetSidePx(fitted.width);
     setRoi(fitted);
+    return Number(roiSideInUnit(fitted.width, pixelSize, roiSizeUnit).toFixed(roiUnitPrecision(pixelSize, roiSizeUnit)));
   };
 
   const runAnalysis = () => {
@@ -792,6 +792,21 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   const roiSideMin = roiSizeUnit === 'px' ? 1 : roiSideInUnit(1, pixelSize, roiSizeUnit);
   const roiSideMax = image ? roiSideInUnit(Math.min(image.width, image.height), pixelSize, roiSizeUnit) : 1;
   const roiSideStep = roiSideMin;
+  // Commit after typing, so clearing/replacing a value never shrinks the ROI mid-entry.
+  const roiSideInput = (label: string) => <input
+    key={`${image?.hash}:${roiSizeUnit}:${roiSideValue}:${Boolean(roi)}`}
+    aria-label={label} title="输入边长，按回车或离开输入框应用；Esc 取消"
+    type="number" min={roiSideMin} max={roiSideMax} step={roiSideStep}
+    defaultValue={roiSideValue}
+    onBlur={event => {
+      if (event.currentTarget.value === String(roiSideValue)) return;
+      event.currentTarget.value = String(setSquareRoiSide(event.currentTarget.valueAsNumber) ?? roiSideValue);
+    }}
+    onKeyDown={event => {
+      if (event.key === 'Escape') { event.currentTarget.value = String(roiSideValue); event.currentTarget.blur(); }
+      if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur(); }
+    }}
+  />;
   const layoutReferenceCm = roi && pixelSize > 0 ? roi.width * pixelSize * layoutSizeRatio / 10000 : null;
 
   const referenceScaleControls = !(pixelSize > 0) && (
@@ -874,7 +889,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
           <div className="field-group"><p>显示去杂色</p><label className="scale-toggle"><input type="checkbox" checked={suppressDisplayBackground} disabled={!image || !backgroundRoi} onChange={event => setSuppressDisplayBackground(event.target.checked)} /><span>背景 ROI 均值 + {DISPLAY_BACKGROUND_SD_MULTIPLIER} SD</span></label><small className="field-help">{backgroundRoi ? '仅改变显示和图片导出。' : '先在图中框选背景 ROI。'}</small></div>
 
           {!isColoc && <>
-            <div className="field-group"><p>正方形裁剪与标尺</p>{image && <div className="crop-size-field"><span>实际边长</span><input aria-label="裁剪边长" type="number" min={roiSideMin} max={roiSideMax} step={roiSideStep} value={roiSideValue} onChange={event => setSquareRoiSide(Number(event.target.value))} /><select aria-label="裁剪边长单位" value={roiSizeUnit} onChange={event => setRoiSizeUnit(event.target.value as RoiSizeUnit)}><option value="px">px</option><option value="um" disabled={!pixelSize}>µm</option><option value="mm" disabled={!pixelSize}>mm</option><option value="cm" disabled={!pixelSize}>cm</option></select></div>}<label className="scale-toggle"><input type="checkbox" checked={squareSizeLocked} onChange={event => { setSquareSizeLocked(event.target.checked); setRoiResize(null); }} /><span>固定边长（仅移动）</span></label><small className="field-help">{squareSizeLocked ? '已固定；框内拖动可移动位置。' : '拖四角缩放，框内拖动移动；输入实际边长可精确设置。'}</small><label className="number-field"><span>排版比例</span><input aria-label="排版比例分母" type="number" min="1" max="100000" step="100" value={layoutSizeRatio} onChange={event => setLayoutSizeRatio(Math.min(100000, Math.max(1, Math.round(Number(event.target.value) || 1))))} /><span>倍</span></label><small className="field-help">实际 : 排版 = 1 : {layoutSizeRatio}{layoutReferenceCm !== null ? ` → ${format(layoutReferenceCm, 4)} cm` : ''}；仅换算，不改变 ROI、定量或导出像素。</small><label className="number-field"><span>像素尺寸</span><input type="number" min="0" step="0.001" value={pixelSize} onChange={event => { const value = Math.max(0, Number(event.target.value) || 0); setPixelSize(value); if (!value) setRoiSizeUnit('px'); }} /><span>µm/px</span></label>{referenceScaleControls}<label className="scale-toggle"><input type="checkbox" checked={showScaleBar} onChange={event => setShowScaleBar(event.target.checked)} /><span>导出显示比例尺</span></label>{showScaleBar && <label className="number-field"><span>比例尺</span><input type="number" min="0.1" step="0.1" value={scaleBarUm} onChange={event => setScaleBarUm(Math.max(.1, Number(event.target.value) || .1))} /><span>µm</span></label>}</div>
+            <div className="field-group"><p>正方形裁剪与标尺</p>{image && <div className="crop-size-field"><span>实际边长</span>{roiSideInput('裁剪边长')}<select aria-label="裁剪边长单位" value={roiSizeUnit} onChange={event => setRoiSizeUnit(event.target.value as RoiSizeUnit)}><option value="px">px</option><option value="um" disabled={!pixelSize}>µm</option><option value="mm" disabled={!pixelSize}>mm</option><option value="cm" disabled={!pixelSize}>cm</option></select></div>}<label className="scale-toggle"><input type="checkbox" checked={squareSizeLocked} onChange={event => { setSquareSizeLocked(event.target.checked); setRoiResize(null); }} /><span>固定边长（仅移动）</span></label><small className="field-help">{squareSizeLocked ? '已固定；框内拖动可移动位置。' : '拖四角缩放，框内拖动移动；输入实际边长可精确设置。'}</small><label className="number-field"><span>排版比例</span><input aria-label="排版比例分母" type="number" min="1" max="100000" step="100" value={layoutSizeRatio} onChange={event => setLayoutSizeRatio(Math.min(100000, Math.max(1, Math.round(Number(event.target.value) || 1))))} /><span>倍</span></label><small className="field-help">实际 : 排版 = 1 : {layoutSizeRatio}{layoutReferenceCm !== null ? ` → ${format(layoutReferenceCm, 4)} cm` : ''}；仅换算，不改变 ROI、定量或导出像素。</small><label className="number-field"><span>像素尺寸</span><input type="number" min="0" step="0.001" value={pixelSize} onChange={event => { const value = Math.max(0, Number(event.target.value) || 0); setPixelSize(value); if (!value) setRoiSizeUnit('px'); }} /><span>µm/px</span></label>{referenceScaleControls}<label className="scale-toggle"><input type="checkbox" checked={showScaleBar} onChange={event => setShowScaleBar(event.target.checked)} /><span>导出显示比例尺</span></label>{showScaleBar && <label className="number-field"><span>比例尺</span><input type="number" min="0.1" step="0.1" value={scaleBarUm} onChange={event => setScaleBarUm(Math.max(.1, Number(event.target.value) || .1))} /><span>µm</span></label>}</div>
             <div className="field-group"><p>线扫描通道（可选）</p><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorA].css }} />通道 A<select value={channelAId} onChange={event => setChannelAId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{channelSettings.find(setting => setting.id === channel.id)?.label || channel.label}</option>)}</select></label><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorB].css }} />通道 B<select value={channelBId} onChange={event => setChannelBId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{channelSettings.find(setting => setting.id === channel.id)?.label || channel.label}</option>)}</select></label></div>
           </>}
 
@@ -906,7 +921,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
           </> : <>
             <div className="metric hero-metric"><small>Corrected Mean · {primaryIntensityLabel}</small><strong>{primaryIntensity ? format(primaryIntensity.correctedMean, 2) : '—'}</strong><span>首个所选通道的背景校正平均强度</span></div>
             <div className="metric-row"><div className="metric"><small>CTCF</small><strong>{primaryIntensity ? format(primaryIntensity.ctcf, 1) : '—'}</strong><span>{primaryIntensityLabel}</span></div><div className="metric"><small>饱和</small><strong>{primaryIntensity ? `${format(primaryIntensity.saturationPct, 2)}%` : '—'}</strong><span>有效位深上限</span></div></div>
-            <div className="quick-stats"><span><small>ROI 像素</small><b>{primaryIntensity ? primaryIntensity.pixels.toLocaleString() : '—'}</b></span><span><small>所选通道</small><b>{enabledIntensityIds.length}</b></span><span><small>正方形边长</small><b>{roi ? roiSideLabel(roi.width, pixelSize, roiSizeUnit) : '全图'}</b></span></div>
+            <div className="quick-stats"><span><small>ROI 像素</small><b>{primaryIntensity ? primaryIntensity.pixels.toLocaleString() : '—'}</b></span><span><small>所选通道</small><b>{enabledIntensityIds.length}</b></span><span><small>正方形边长</small>{image && roi ? <><label className="roi-side-editor">{roiSideInput('正方形边长')}<em>{ROI_UNIT_LABELS[roiSizeUnit]}</em></label><small className="roi-side-equivalent">{roiSizeUnit === 'px' ? pixelSize > 0 ? `${format(roi.width * pixelSize, 2)} µm` : '' : `${Math.round(roi.width)} px`}</small></> : <b>全图</b>}</span></div>
           </>}
           {error && <p className="error-message" role="alert">{error}</p>}
           <button className="analyze-button" onClick={runAnalysis} disabled={!image || !channelConfirmed || busy || loading || Boolean(image?.displayOnly && !allowDisplayOnly)}>{busy ? '正在计算…' : image && !channelConfirmed ? '先确认通道' : image ? `运行${isColoc ? '共定位' : '强度'}分析` : '载入图像后分析'} <span>→</span></button>
