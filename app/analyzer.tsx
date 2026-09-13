@@ -20,6 +20,7 @@ import {
 } from '../lib/analysis';
 import { loadImages, type LoadedImage } from '../lib/image';
 import { createStoredZip, safeFilePart } from '../lib/export-archive';
+import { saveFile } from '../lib/save-file';
 import { encodePseudocolorTiff, renderRoiPseudocolor, renderedRoiToBlob, resolveDisplayRange } from '../lib/roi-export';
 
 type Tool = 'roi' | 'background' | 'line';
@@ -144,21 +145,6 @@ function roiSideLabel(sidePx: number, pixelSizeUm: number, unit: RoiSizeUnit) {
 }
 
 const csvCell = (value: string | number) => `"${String(value).replaceAll('"', '""')}"`;
-
-function saveText(name: string, text: string, type = 'text/plain;charset=utf-8') {
-  const url = URL.createObjectURL(new Blob([text], { type }));
-  const link = document.createElement('a');
-  link.href = url; link.download = name; document.body.appendChild(link); link.click(); link.remove();
-  URL.revokeObjectURL(url);
-}
-
-function saveBlob(name: string, blob: Blob) {
-  const url = URL.createObjectURL(blob);
-  const link = document.createElement('a');
-  link.href = url; link.download = name; document.body.appendChild(link); link.click(); link.remove();
-  // Allow the browser to finish starting the download before releasing its data.
-  setTimeout(() => URL.revokeObjectURL(url), 60_000);
-}
 
 function normalizedRect(rect: Rect | null) {
   if (!rect) return null;
@@ -645,6 +631,12 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     });
   };
 
+  const saveText = (name: string, text: string, mime: string) => {
+    setError('');
+    void saveFile(name, mime, () => new Blob([text], { type: mime }))
+      .catch(problem => setError(problem instanceof Error ? problem.message : '文件保存失败，请重试。'));
+  };
+
   const exportRows = () => {
     if (!channelConfirmed) { setError('请先确认通道名称和伪彩。'); return; }
     if (!analysis || !image || !channelA || !channelB) return;
@@ -747,40 +739,35 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       if (jobs.length > 1 && estimatedBatchRgbBytes > MAX_BATCH_RGB_BYTES) throw new Error('批量裁剪区域过大。为避免浏览器卡死，请缩小裁剪框，或改为分别导出单通道。');
       const extension = format === 'tiff' ? 'tif' : format;
       const mime = format === 'tiff' ? 'image/tiff' : format === 'jpg' ? 'image/jpeg' : 'image/png';
-      const archiveEntries: Array<{ name: string; data: ArrayBuffer }> = [];
       const blankViews: string[] = [];
-      let baseName = '';
-
-      for (const job of jobs) {
-        const rendered = renderRoiPseudocolor({
-          image,
-          channels,
-          roi,
-          view: job.view,
-          blackPointPercent: displayBlackPoint,
-          pixelSizeUm: showScaleBar ? rulerPixelSize : null,
-          scaleBarUm: showScaleBar ? scaleBarUm : null,
-          mask: job.view === 'mask' && analysis?.coloc ? { channelAId: channelA.id, channelBId: channelB.id, thresholdA: analysis.coloc.thresholdA, thresholdB: analysis.coloc.thresholdB, backgroundA: background.a, backgroundB: background.b } : null,
-        });
-        if (!rendered.hasVisibleSignal) blankViews.push(job.suffix);
-        if (showScaleBar && !rendered.scaleBar?.rendered) throw new Error(`${rendered.scaleBar?.reason ?? '比例尺无法显示。'}请增大裁剪框或缩短比例尺后再导出。`);
-        if (!baseName) {
-          const source = rendered.sourceRoi;
-          baseName = `${safeFilePart(image.fileName.replace(/\.[^.]+$/, ''), 'image')}_${roi ? `ROI-x${source.x}-y${source.y}` : 'Full'}-${source.width}x${source.height}px`;
+      const baseName = `${safeFilePart(image.fileName.replace(/\.[^.]+$/, ''), 'image')}_${roi ? `ROI-x${exportBounds.x0}-y${exportBounds.y0}` : 'Full'}-${exportBounds.x1 - exportBounds.x0}x${exportBounds.y1 - exportBounds.y0}px`;
+      const batch = !isColoc && intensityExportTarget === 'all';
+      const fileName = batch ? `${baseName}_Merge+Channels_${format.toUpperCase()}.zip` : `${baseName}_${jobs[0].suffix}.${extension}`;
+      const saved = await saveFile(fileName, batch ? 'application/zip' : mime, async () => {
+        const archiveEntries: Array<{ name: string; data: ArrayBuffer }> = [];
+        for (const job of jobs) {
+          const rendered = renderRoiPseudocolor({
+            image,
+            channels,
+            roi,
+            view: job.view,
+            blackPointPercent: displayBlackPoint,
+            pixelSizeUm: showScaleBar ? rulerPixelSize : null,
+            scaleBarUm: showScaleBar ? scaleBarUm : null,
+            mask: job.view === 'mask' && analysis?.coloc ? { channelAId: channelA.id, channelBId: channelB.id, thresholdA: analysis.coloc.thresholdA, thresholdB: analysis.coloc.thresholdB, backgroundA: background.a, backgroundB: background.b } : null,
+          });
+          if (!rendered.hasVisibleSignal) blankViews.push(job.suffix);
+          if (showScaleBar && !rendered.scaleBar?.rendered) throw new Error(`${rendered.scaleBar?.reason ?? '比例尺无法显示。'}请增大裁剪框或缩短比例尺后再导出。`);
+          const data = format === 'tiff'
+            ? await encodePseudocolorTiff(rendered)
+            : await (await renderedRoiToBlob(rendered, format)).arrayBuffer();
+          archiveEntries.push({ name: `${baseName}_${job.suffix}.${extension}`, data });
         }
-        const data = format === 'tiff'
-          ? await encodePseudocolorTiff(rendered)
-          : await (await renderedRoiToBlob(rendered, format)).arrayBuffer();
-        archiveEntries.push({ name: `${baseName}_${job.suffix}.${extension}`, data });
-      }
-
-      if (!isColoc && intensityExportTarget === 'all') {
-        const archive = await createStoredZip(archiveEntries);
-        saveBlob(`${baseName}_Merge+Channels_${format.toUpperCase()}.zip`, new Blob([archive], { type: 'application/zip' }));
-      } else {
-        saveBlob(archiveEntries[0].name, new Blob([archiveEntries[0].data], { type: mime }));
-      }
-      if (blankViews.length) setError(`已导出，但以下视图在当前选区及显示设置下全黑：${blankViews.join('、')}。请检查选区、导出通道，或降低 Min / 黑场并关闭显示去杂色后重试。`);
+        return batch
+          ? new Blob([await createStoredZip(archiveEntries)], { type: 'application/zip' })
+          : new Blob([archiveEntries[0].data], { type: mime });
+      });
+      if (saved && blankViews.length) setError(`已导出，但以下视图在当前选区及显示设置下全黑：${blankViews.join('、')}。请检查选区、导出通道，或降低 Min / 黑场并关闭显示去杂色后重试。`);
     } catch (problem) { setError(problem instanceof Error ? problem.message : 'ROI 图片导出失败。'); }
     finally { setExportingRoi(null); }
   };
