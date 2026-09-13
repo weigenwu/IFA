@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { saveFile } from '../lib/save-file.ts';
+import { saveFile, type PreparedDownload } from '../lib/save-file.ts';
 
 test('exports share native folder memory, preserve bytes, and handle cancellation/failures/fallback', async t => {
   const oldWindow = Object.getOwnPropertyDescriptor(globalThis, 'window');
@@ -23,11 +23,12 @@ test('exports share native folder memory, preserve bytes, and handle cancellatio
   };
   const link = { href: '', download: '', click: () => events.push('download'), remove: () => events.push('remove') };
   const deferred: Array<() => void> = [];
+  let downloadBlob: Blob | MediaSource | undefined;
   Object.defineProperty(globalThis, 'window', { configurable: true, value: fakeWindow });
   Object.defineProperty(globalThis, 'document', { configurable: true, value: {
     createElement: () => link, body: { appendChild: () => events.push('append') },
   } });
-  t.mock.method(URL, 'createObjectURL', () => 'blob:export');
+  t.mock.method(URL, 'createObjectURL', (blob: Blob | MediaSource) => { downloadBlob = blob; return 'blob:export'; });
   t.mock.method(URL, 'revokeObjectURL', () => { events.push('revoke'); });
   t.mock.method(globalThis, 'setTimeout', ((callback: () => void) => {
     deferred.push(callback);
@@ -66,6 +67,46 @@ test('exports share native folder memory, preserve bytes, and handle cancellatio
     }) });
     await assert.rejects(saveFile('failed.tif', 'image/tiff', makeBlob), /disk full/);
     assert.deepEqual(events, ['encode', 'abort']);
+
+    // Regression: the picker succeeds, but createWritable (or write/close) is refused.
+    // Reuse the already encoded bytes and preserve a user-clickable download, without an expiry timer.
+    for (const phase of ['create', 'write', 'close']) {
+      for (const reason of ['NotAllowedError', 'SecurityError', 'NotSupportedError']) {
+        fakeWindow.showSaveFilePicker = async () => ({ name: '用户重命名.tif', createWritable: async () => {
+          events.push('create');
+          if (phase === 'create') throw new DOMException('Unavailable', reason);
+          return {
+            write: async () => { events.push('write'); if (phase === 'write') throw new DOMException('Unavailable', reason); },
+            close: async () => { events.push('close'); if (phase === 'close') throw new DOMException('Unavailable', reason); },
+            abort: async () => { events.push('abort'); },
+          };
+        } });
+        events.length = 0;
+        let ready: PreparedDownload | undefined;
+        assert.equal(await saveFile('original.tif', 'image/tiff', makeBlob, file => { ready = file; events.push('ready'); }), true);
+        assert.deepEqual(ready, { name: '用户重命名.tif', url: 'blob:export' });
+        assert.equal(downloadBlob, source);
+        assert.equal(events.filter(event => event === 'encode').length, 1);
+        assert.equal(events.includes('abort'), phase !== 'create');
+        assert.deepEqual(events.slice(-4), ['ready', 'append', 'download', 'remove']);
+        assert.equal(link.download, '用户重命名.tif');
+        assert.equal(deferred.length, 0);
+      }
+    }
+
+    fakeWindow.showSaveFilePicker = async () => ({ createWritable: async () => { throw new DOMException('Scan failed', 'AbortError'); } });
+    events.length = 0;
+    await assert.rejects(saveFile('scan.tif', 'image/tiff', makeBlob), { name: 'AbortError' });
+    assert.deepEqual(events, ['encode']); // A security scan failure must not trigger an alternate save.
+
+    fakeWindow.showSaveFilePicker = undefined;
+    const autoClick = link.click;
+    link.click = () => { throw new Error('Automatic downloads blocked'); };
+    let clickReady: PreparedDownload | undefined;
+    assert.equal(await saveFile('manual.png', 'image/png', makeBlob, file => { clickReady = file; }), true);
+    assert.deepEqual(clickReady, { name: 'manual.png', url: 'blob:export' });
+    assert.equal(deferred.length, 0);
+    link.click = autoClick;
 
     for (const reason of [null, 'SecurityError', 'NotSupportedError']) {
       fakeWindow.showSaveFilePicker = reason ? async () => { throw new DOMException('Unavailable', reason); } : undefined;

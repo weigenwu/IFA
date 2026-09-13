@@ -21,7 +21,7 @@ import {
 } from '../lib/analysis';
 import { loadImages, type LoadedImage } from '../lib/image';
 import { createStoredZip, safeFilePart } from '../lib/export-archive';
-import { saveFile } from '../lib/save-file';
+import { saveFile, type PreparedDownload } from '../lib/save-file';
 import ExportLocation from './export-location';
 import { encodePseudocolorTiff, renderRoiPseudocolor, renderedRoiToBlob, resolveDisplayRange } from '../lib/roi-export';
 
@@ -181,6 +181,8 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
+  const [downloadReady, setDownloadReady] = useState<PreparedDownload | null>(null);
+  useEffect(() => () => { if (downloadReady) URL.revokeObjectURL(downloadReady.url); }, [downloadReady]);
   const [draggingFile, setDraggingFile] = useState(false);
   const [allowDisplayOnly, setAllowDisplayOnly] = useState(false);
   const [channelSettings, setChannelSettings] = useState<ChannelSetting[]>([]);
@@ -282,7 +284,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   const load = useCallback(async (files?: FileList | File[]) => {
     const selected = Array.from(files ?? []);
     if (!selected.length) return;
-    setLoading(true); setError(''); setAnalysis(null);
+    setLoading(true); setError(''); setAnalysis(null); setDownloadReady(null);
     try {
       const loaded = await loadImages(selected);
       setImage(loaded);
@@ -633,8 +635,8 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   };
 
   const saveText = (name: string, text: string, mime: string) => {
-    setError('');
-    void saveFile(name, mime, () => new Blob([text], { type: mime }))
+    setError(''); setDownloadReady(null);
+    void saveFile(name, mime, () => new Blob([text], { type: mime }), setDownloadReady)
       .catch(problem => setError(problem instanceof Error ? problem.message : '文件保存失败，请重试。'));
   };
 
@@ -720,6 +722,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     if (!isColoc && !intensityChannels.length) { setError('请至少勾选 1 个要显示和导出的通道。'); return; }
     if (showScaleBar && !(rulerPixelSize > 0)) { setError('请填写真实像素尺寸，或点击标尺设置中的“使用参考默认值”。'); return; }
     if (exportingRoi) return;
+    setDownloadReady(null);
     setExportingRoi(format);
     try {
       setError('');
@@ -767,8 +770,8 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
         return batch
           ? new Blob([await createStoredZip(archiveEntries)], { type: 'application/zip' })
           : new Blob([archiveEntries[0].data], { type: mime });
-      });
-      if (saved && blankViews.length) setError(`已导出，但以下视图在当前选区及显示设置下全黑：${blankViews.join('、')}。请检查选区、导出通道，或降低 Min / 黑场并关闭显示去杂色后重试。`);
+      }, setDownloadReady);
+      if (saved && blankViews.length) setError(`文件已生成，但以下视图在当前选区及显示设置下全黑：${blankViews.join('、')}。请检查选区、导出通道，或降低 Min / 黑场并关闭显示去杂色后重试。`);
     } catch (problem) { setError(problem instanceof Error ? problem.message : 'ROI 图片导出失败。'); }
     finally { setExportingRoi(null); }
   };
@@ -924,6 +927,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
             <div className="quick-stats"><span><small>ROI 像素</small><b>{primaryIntensity ? primaryIntensity.pixels.toLocaleString() : '—'}</b></span><span><small>所选通道</small><b>{enabledIntensityIds.length}</b></span><span><small>正方形边长</small>{image && roi ? <><label className="roi-side-editor">{roiSideInput('正方形边长')}<em>{ROI_UNIT_LABELS[roiSizeUnit]}</em></label><small className="roi-side-equivalent">{roiSizeUnit === 'px' ? pixelSize > 0 ? `${format(roi.width * pixelSize, 2)} µm` : '' : `${Math.round(roi.width)} px`}</small></> : <b>全图</b>}</span></div>
           </>}
           {error && <p className="error-message" role="alert">{error}</p>}
+          {downloadReady && <div className="download-ready" role="status"><strong>文件已生成</strong><small title={downloadReady.name}>{downloadReady.name}</small><a href={downloadReady.url} download={downloadReady.name}>点击下载文件</a><p>若未自动下载，请点上方按钮。保存位置由微信 / 浏览器决定。</p></div>}
           <button className="analyze-button" onClick={runAnalysis} disabled={!image || !channelConfirmed || busy || loading || Boolean(image?.displayOnly && !allowDisplayOnly)}>{busy ? '正在计算…' : image && !channelConfirmed ? '先确认通道' : image ? `运行${isColoc ? '共定位' : '强度'}分析` : '载入图像后分析'} <span>→</span></button>
           <p className="run-note">{isColoc ? `${thresholdLabels[thresholdMethod]} · ` : ''}{backgroundLabels[backgroundMethod]}</p>
         </aside>
