@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { fromArrayBuffer } from 'geotiff';
 
-import type { ChannelData } from '../lib/analysis.ts';
+import { intensityStats, type ChannelData } from '../lib/analysis.ts';
 import type { LoadedImage } from '../lib/image.ts';
 import { encodePseudocolorTiff, renderRoiPseudocolor, resolveDisplayRange, ROI_TIFF_DESCRIPTION } from '../lib/roi-export.ts';
 
@@ -92,6 +92,37 @@ test('display background floor suppresses weak pixels without mutating source da
   assert.deepEqual(Array.from(rendered.rgb.slice(5 * 3, 5 * 3 + 3)), [0, 0, 0]);
   assert.ok(rendered.rgb[7 * 3 + 1] > 0);
   assert.deepEqual(Array.from(source.channels[0].data), before);
+});
+
+test('wide background controls suppress up to 99.9% without changing quantitative data', () => {
+  for (const peak of [255, 4095]) {
+    const values = [0, Math.round(peak * .5), Math.round(peak * .9), peak];
+    const signal = { ...channel('a', []), data: new Uint16Array(values), maxValue: peak, bitDepth: peak === 255 ? 8 : 12 };
+    const source = image(4, 1, [signal]);
+    const stats = intensityStats(signal, 4, 1, null);
+    const common = { image: source, channels: [{ id: 'a', color: 'green' as const, displayMin: 0, displayMax: peak }] };
+    const oldLimit = renderRoiPseudocolor({ ...common, blackPointPercent: 60 });
+    const strong = renderRoiPseudocolor({ ...common, blackPointPercent: 95 });
+    const strongest = renderRoiPseudocolor({ ...common, blackPointPercent: 99.9 });
+    assert.ok(oldLimit.rgb[7] > 0);
+    assert.equal(strong.rgb[7], 0, '95% suppresses background beyond the former 60% limit');
+    assert.deepEqual(Array.from(strongest.rgb), [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 255, 0]);
+    assert.ok(resolveDisplayRange(signal, 4, 1, { displayMin: 0, displayMax: peak, blackPointPercent: 99.9 }).range > 0);
+    assert.deepEqual(Array.from(signal.data), values);
+    assert.deepEqual(intensityStats(signal, 4, 1, null), stats);
+  }
+});
+
+test('manual Min/Max changes only its channel and does not rescan source data to resolve the window', () => {
+  const source = image(4, 1, [channel('a', [0, 50, 100, 200]), channel('b', [10, 20, 30, 40])]);
+  const common = { image: source, channels: [{ id: 'a', color: 'red' as const, displayMin: 0, displayMax: 200 }, { id: 'b', color: 'green' as const, displayMin: 0, displayMax: 200 }] };
+  const before = renderRoiPseudocolor(common);
+  const adjusted = renderRoiPseudocolor({ ...common, channels: [{ ...common.channels[0], displayMin: 75, displayMax: 100 }, common.channels[1]] });
+  assert.equal(adjusted.rgb[3], 0);
+  assert.equal(adjusted.rgb[6], 255);
+  for (let pixel = 0; pixel < 4; pixel++) assert.equal(adjusted.rgb[pixel * 3 + 1], before.rgb[pixel * 3 + 1]);
+  const noScan = { ...source.channels[0], get data(): Uint8Array { throw new Error('unexpected pixel scan during slider update'); } };
+  assert.deepEqual(resolveDisplayRange(noScan, 4, 1, { displayMin: 75, displayMax: 100 }), { low: 75, high: 100, range: 25 });
 });
 
 test('explicit per-channel display window is linear and shared by ROI export', () => {

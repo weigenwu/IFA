@@ -590,6 +590,17 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     updateChannelSetting(id, { displayMin: range.min, displayMax: range.max, displayPreset: preset });
   };
 
+  const resetDisplay = () => {
+    if (!image) return;
+    setChannelSettings(current => current.map(setting => {
+      const channel = image.channels.find(candidate => candidate.id === setting.id);
+      if (!channel) return setting;
+      const range = displayWindow(channel, image.width, image.height, 'imagej');
+      return { ...setting, displayMin: range.min, displayMax: range.max, displayPreset: 'imagej' };
+    }));
+    setDisplayBlackPoint(0); setSuppressDisplayBackground(false); setError('');
+  };
+
   const setManualDisplayValue = (id: string, key: 'displayMin' | 'displayMax', value: number) => {
     if (!Number.isFinite(value)) return;
     const setting = channelSettings.find(candidate => candidate.id === id);
@@ -853,8 +864,23 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
             </div>
             <div className="display-presets"><button className={activeDisplaySetting.displayPreset === 'raw' ? 'selected' : ''} onClick={() => setChannelDisplayPreset(activeDisplaySetting.id, 'raw')}>原始</button><button className={activeDisplaySetting.displayPreset === 'auto' ? 'selected' : ''} onClick={() => setChannelDisplayPreset(activeDisplaySetting.id, 'auto')}>自动</button><button className={activeDisplaySetting.displayPreset === 'imagej' ? 'selected' : ''} onClick={() => setChannelDisplayPreset(activeDisplaySetting.id, 'imagej')}>ImageJ</button></div>
             <div className="display-values"><label>Min<input type="number" step={activeDisplayChannel.integer ? 1 : 'any'} value={Number(activeDisplaySetting.displayMin.toPrecision(7))} onChange={event => setManualDisplayValue(activeDisplaySetting.id, 'displayMin', Number(event.target.value))} /></label><label>Max<input type="number" step={activeDisplayChannel.integer ? 1 : 'any'} value={Number(activeDisplaySetting.displayMax.toPrecision(7))} onChange={event => setManualDisplayValue(activeDisplaySetting.id, 'displayMax', Number(event.target.value))} /></label></div>
-            <label className="range-field"><span>黑场 {displayBlackPoint}%</span><input type="range" min="0" max="60" value={displayBlackPoint} onChange={event => setDisplayBlackPoint(Number(event.target.value))} /></label>
-            <small className="field-help">拖动红线调整 Max；仅影响显示和导图。</small>
+            {(['displayMin', 'displayMax'] as const).map(key => (
+              <label className="display-slider-field" key={key}>
+                <span>{key === 'displayMin' ? '黑场 Min · 压暗背景' : '白场 Max · 调整亮度'}</span>
+                <input type="range" aria-label={`${activeDisplaySetting.label} ${key === 'displayMin' ? '黑场 Min' : '白场 Max'}`} min={Math.min(histogram.axisMin, activeDisplaySetting.displayMin)} max={Math.max(histogram.axisMax, activeDisplaySetting.displayMax)} step={activeDisplayChannel.integer ? 1 : Math.max((histogram.axisMax - histogram.axisMin) / 1000, Number.EPSILON)} value={activeDisplaySetting[key]} onChange={event => {
+                  const gap = activeDisplayChannel.integer ? 1 : Math.max((histogram.axisMax - histogram.axisMin) / 1000, Number.EPSILON);
+                  const value = Number(event.target.value);
+                  setManualDisplayValue(activeDisplaySetting.id, key, key === 'displayMin' ? Math.min(value, activeDisplaySetting.displayMax - gap) : Math.max(value, activeDisplaySetting.displayMin + gap));
+                }} />
+              </label>
+            ))}
+            <label className="display-slider-field">
+              <span>全通道压背景</span>
+              <span className="display-percent"><input aria-label="全通道压背景百分比" type="number" min="0" max="99.9" step="0.1" value={displayBlackPoint} onChange={event => { const value = Number(event.target.value); if (Number.isFinite(value)) setDisplayBlackPoint(Math.min(99.9, Math.max(0, value))); }} />%</span>
+              <input aria-label="全通道压背景" type="range" min="0" max="99.9" step="0.1" value={displayBlackPoint} onChange={event => setDisplayBlackPoint(Number(event.target.value))} />
+            </label>
+            <button className="channel-confirm" onClick={resetDisplay}>重置显示</button>
+            <small className="field-help">Min 向右压背景，Max 向左提亮；过强会隐藏弱信号。仅影响显示和导图。</small>
           </div>}
 
           <div className="field-group"><p>显示去杂色</p><label className="scale-toggle"><input type="checkbox" checked={suppressDisplayBackground} disabled={!image || !backgroundRoi} onChange={event => setSuppressDisplayBackground(event.target.checked)} /><span>背景 ROI 均值 + {DISPLAY_BACKGROUND_SD_MULTIPLIER} SD</span></label><small className="field-help">{backgroundRoi ? '仅改变显示和图片导出。' : '先在图中框选背景 ROI。'}</small></div>

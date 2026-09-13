@@ -82,10 +82,9 @@ export function resolveDisplayRange(
   height: number,
   options: Pick<RoiExportChannel, 'displayFloor' | 'displayMin' | 'displayMax'> & { blackPointPercent?: number } = {},
 ) {
-  const observedMin = percentileInRoi(channel, width, height, null, 0);
-  const observedMax = percentileInRoi(channel, width, height, null, 1);
-  const requestedMin = Number.isFinite(options.displayMin) ? Number(options.displayMin) : observedMin;
-  const requestedMax = Number.isFinite(options.displayMax) ? Number(options.displayMax) : observedMax;
+  // Manual sliders already supply the endpoints; do not rescan every source pixel on each drag.
+  const requestedMin = Number.isFinite(options.displayMin) ? Number(options.displayMin) : percentileInRoi(channel, width, height, null, 0);
+  const requestedMax = Number.isFinite(options.displayMax) ? Number(options.displayMax) : percentileInRoi(channel, width, height, null, 1);
   const high = requestedMax > requestedMin ? requestedMax : requestedMin + 1;
   const floor = Number.isFinite(options.displayFloor) ? Number(options.displayFloor) : requestedMin;
   const displayLow = Math.min(high, Math.max(requestedMin, floor));

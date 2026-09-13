@@ -81,7 +81,11 @@ select,input[type="number"] { min-width:0; height:30px; border:1px solid var(--l
 .display-presets { display:grid; grid-template-columns:1fr 1fr 1fr; gap:5px; margin-top:7px; }.display-presets button{height:27px;border:1px solid var(--line);border-radius:6px;color:#60777b;background:#f7faf9;font-size:8px;cursor:pointer}.display-presets button.selected{border-color:#66babc;color:#116e71;background:#e7f7f5}
 .display-values { display:grid; grid-template-columns:1fr 1fr; gap:7px; margin-top:7px; }.display-values label{display:grid;grid-template-columns:25px 1fr;align-items:center;color:#6e7e82;font-size:8px}.display-values input{width:100%}
 .crop-size-field { display:grid; grid-template-columns:42px 1fr 55px; align-items:center; gap:5px; color:#64757a; font-size:9px; }.crop-size-field input,.crop-size-field select{width:100%}
-.field-group>.range-field { display:grid; grid-template-columns:78px 1fr; align-items:center; gap:7px; color:#64757a; font-size:9px; }.range-field input{width:100%;accent-color:var(--cyan)}
+.field-group>label.range-field { display:grid; grid-template-columns:78px minmax(0,1fr); align-items:center; gap:7px; color:#64757a; font-size:9px; }.range-field input{width:100%;accent-color:var(--cyan)}
+.display-window label.display-slider-field { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:4px 8px; margin-top:12px; font-size:12px; }
+.display-slider-field>input[type="range"] { grid-column:1/-1; width:100%; min-width:0; height:26px; margin:0; accent-color:var(--cyan); cursor:ew-resize; }
+.display-percent { display:flex; align-items:center; gap:4px; }
+.display-percent input[type="number"] { width:62px; font-size:12px; }
 .field-group>.scale-toggle { display:flex; align-items:center; gap:7px; margin-top:9px; color:#64757a; font-size:9px; }.scale-toggle input{margin:0;accent-color:var(--cyan)}
 .risk-confirm { margin-top:14px; padding:10px; display:flex; align-items:flex-start; gap:8px; border:1px solid #efc8d7; border-radius:8px; background:#fff5f8; color:#7b5362; font-size:8px; line-height:1.5; }.risk-confirm input{margin:1px 0 0;accent-color:var(--magenta)}.risk-confirm b{display:block;color:#9d345c}
 
