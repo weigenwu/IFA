@@ -102,6 +102,13 @@ select,input[type="number"] { min-width:0; height:30px; border:1px solid var(--l
 .stage-tools { min-height:44px; padding:6px 11px; display:flex; align-items:center; gap:4px; flex-wrap:wrap; background:#1c363f; border-top:1px solid #28434b; }
 .stage-tools button { padding:7px 8px; border:1px solid transparent; border-radius:5px; color:#8fa6aa; background:transparent; font-size:8px; }.stage-tools button:hover,.stage-tools button.selected { color:#dff; border-color:#36545c; background:#274750; }.stage-tools b { margin-right:4px; font-size:12px; }.tool-spacer{flex:1}
 .stage-foot { justify-content:flex-start; gap:25px; min-height:32px; color:#6f878c; background:#172c34; }
+.export-location { padding:10px 13px; border-top:1px solid #365961; color:#d9f5f5; background:#19313a; font-size:14px; }
+.export-location summary { cursor:pointer; }
+.export-location p { margin:8px 0 0; color:#bcd0d2; font-size:12px; line-height:1.5; }
+.export-folder-controls { display:flex; flex-wrap:wrap; gap:8px; margin-top:8px; }
+.export-folder-controls input { flex:1 1 210px; min-width:0; padding:8px; border:1px solid #52747c; border-radius:6px; background:#10252d; color:#fff; }
+.export-folder-controls input::placeholder { color:#a3bac0; }
+.export-folder-controls button { padding:8px 12px; border:1px solid #52747c; border-radius:6px; color:#d9f5f5; background:#23434c; }
 .roi-export-panel { min-height:62px; padding:10px 13px; display:flex; align-items:center; justify-content:space-between; gap:12px; border-top:1px solid #29444c; color:#bcd0d2; background:#19313a; }
 .roi-export-panel strong,.roi-export-panel small{display:block}.roi-export-panel strong{font-size:9px}.roi-export-panel small{max-width:520px;margin-top:4px;color:#7f969b;font-size:8px;line-height:1.45}.roi-export-controls{display:flex;align-items:center;justify-content:flex-end;gap:7px;flex:none}.roi-export-controls select{max-width:230px;padding:8px 28px 8px 9px;border:1px solid #365961;border-radius:7px;color:#d9f5f5;background:#23434c;font-size:9px}.roi-export-panel .export-actions{flex:none}.roi-export-panel .export-actions button{color:#bfecef;border-color:#365961;background:#23434c}.roi-export-panel .export-actions button:hover:not(:disabled){color:#fff;border-color:#4d7b83;background:#2a505a}
 
