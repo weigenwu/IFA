@@ -83,6 +83,8 @@ select,input[type="number"] { min-width:0; height:30px; border:1px solid var(--l
 .crop-size-field { display:grid; grid-template-columns:42px 1fr 55px; align-items:center; gap:5px; color:#64757a; font-size:9px; }.crop-size-field input,.crop-size-field select{width:100%}
 .field-group>label.range-field { display:grid; grid-template-columns:78px minmax(0,1fr); align-items:center; gap:7px; color:#64757a; font-size:9px; }.range-field input{width:100%;accent-color:var(--cyan)}
 .display-window label.display-slider-field { display:grid; grid-template-columns:minmax(0,1fr) auto; gap:4px 8px; margin-top:12px; font-size:12px; }
+.channel-confirm.display-next { height:auto; min-height:36px; padding:8px; font-size:14px; color:#fff; background:#157c80; }
+.channel-confirm.display-next:hover { background:#116b6e; }
 .display-slider-field>input[type="range"] { grid-column:1/-1; width:100%; min-width:0; height:26px; margin:0; accent-color:var(--cyan); cursor:ew-resize; }
 .display-percent { display:flex; align-items:center; gap:4px; }
 .display-percent input[type="number"] { width:62px; font-size:12px; }

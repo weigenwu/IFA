@@ -22,6 +22,7 @@ import {
 import { loadImages, type LoadedImage } from '../lib/image';
 import { createStoredZip, safeFilePart } from '../lib/export-archive';
 import { saveFile, type PreparedDownload } from '../lib/save-file';
+import { nextEnabledChannel } from '../lib/channel-navigation';
 import ExportLocation from './export-location';
 import { encodePseudocolorTiff, renderRoiPseudocolor, renderedRoiToBlob, resolveDisplayRange } from '../lib/roi-export';
 
@@ -226,8 +227,10 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   const displayColorB = channelBSetting?.color ?? 'red';
   const channelALabel = channelASetting?.label || channelA?.label || '通道 A';
   const channelBLabel = channelBSetting?.label || channelB?.label || '通道 B';
-  const activeDisplaySetting = channelSettings.find(setting => setting.id === displayChannelId) ?? channelSettings[0];
+  const displaySettings = isColoc ? channelSettings : channelSettings.filter(setting => setting.enabled);
+  const activeDisplaySetting = displaySettings.find(setting => setting.id === displayChannelId) ?? displaySettings[0];
   const activeDisplayChannel = image?.channels.find(channel => channel.id === activeDisplaySetting?.id);
+  const nextDisplaySetting = nextEnabledChannel(channelSettings, activeDisplaySetting?.id ?? '');
 
   const histogram = useMemo(() => {
     if (!activeDisplayChannel) return null;
@@ -560,6 +563,14 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     setDragStart(null); setDraft(null);
   };
 
+  const selectIntensityView = (target: IntensityExportTarget) => {
+    setIntensityExportTarget(target);
+    if (target.startsWith('channel:')) {
+      setView(target as `channel:${string}`);
+      setDisplayChannelId(target.slice('channel:'.length));
+    } else setView('overlay');
+  };
+
   const updateChannelSetting = (id: string, patch: Partial<ChannelSetting>) => {
     setChannelSettings(current => {
       if (patch.enabled && !current.find(setting => setting.id === id)?.enabled && current.filter(setting => setting.enabled).length >= 8) {
@@ -859,7 +870,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
 
           {activeDisplaySetting && activeDisplayChannel && histogram && <div className="field-group display-window">
             <p>显示范围</p>
-            <label className="wide-field">通道<select value={activeDisplaySetting.id} onChange={event => setDisplayChannelId(event.target.value)}>{channelSettings.map(setting => <option key={setting.id} value={setting.id}>{setting.label}</option>)}</select></label>
+            <label className="wide-field">通道<select value={activeDisplaySetting.id} onChange={event => { if (isColoc) setDisplayChannelId(event.target.value); else selectIntensityView(`channel:${event.target.value}`); }}>{displaySettings.map(setting => <option key={setting.id} value={setting.id}>{setting.label}</option>)}</select></label>
             <div className="display-histogram-control">
               <svg className="display-histogram" viewBox="0 0 100 32" preserveAspectRatio="none" aria-label={`${activeDisplaySetting.label} 强度直方图`}>
                 <polygon points={histogram.points} />
@@ -880,6 +891,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
                 }} />
               </label>
             ))}
+            {!isColoc && <button className="channel-confirm display-next" title={nextDisplaySetting ? `下一通道：${nextDisplaySetting.label}` : '查看所有已勾选通道的合并图'} onClick={() => selectIntensityView(nextDisplaySetting ? `channel:${nextDisplaySetting.id}` : 'merge')}>{nextDisplaySetting ? '完成 → 下一通道' : '完成 → 查看 Merge'}</button>}
             <label className="display-slider-field">
               <span>全通道压背景</span>
               <span className="display-percent"><input aria-label="全通道压背景百分比" type="number" min="0" max="99.9" step="0.1" value={displayBlackPoint} onChange={event => { const value = Number(event.target.value); if (Number.isFinite(value)) setDisplayBlackPoint(Math.min(99.9, Math.max(0, value))); }} />%</span>
@@ -904,14 +916,14 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
         </aside>
 
         <div className="image-stage">
-          <div className="stage-toolbar"><div className="view-switch"><button className={view === 'overlay' ? 'selected' : ''} onClick={() => { setView('overlay'); if (!isColoc) setIntensityExportTarget('merge'); }}>Merge</button>{isColoc ? <><button className={view === 'a' ? 'selected' : ''} onClick={() => setView('a')}>通道 A</button><button className={view === 'b' ? 'selected' : ''} onClick={() => setView('b')}>通道 B</button><button className={view === 'mask' ? 'selected' : ''} onClick={() => setView('mask')} disabled={!analysis?.coloc}>Mask</button></> : intensityChannels.map(({ channel, setting }) => <button key={channel.id} className={view === `channel:${channel.id}` ? 'selected' : ''} onClick={() => { setView(`channel:${channel.id}`); setIntensityExportTarget(`channel:${channel.id}`); }}><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[setting.color].css }} />{setting.label || channel.label}</button>)}</div><span>显示设置不影响定量</span></div>
+          <div className="stage-toolbar"><div className="view-switch"><button className={view === 'overlay' ? 'selected' : ''} onClick={() => { if (isColoc) setView('overlay'); else selectIntensityView('merge'); }}>Merge</button>{isColoc ? <><button className={view === 'a' ? 'selected' : ''} onClick={() => setView('a')}>通道 A</button><button className={view === 'b' ? 'selected' : ''} onClick={() => setView('b')}>通道 B</button><button className={view === 'mask' ? 'selected' : ''} onClick={() => setView('mask')} disabled={!analysis?.coloc}>Mask</button></> : intensityChannels.map(({ channel, setting }) => <button key={channel.id} className={view === `channel:${channel.id}` ? 'selected' : ''} onClick={() => selectIntensityView(`channel:${channel.id}`)}><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[setting.color].css }} />{setting.label || channel.label}</button>)}</div><span>显示设置不影响定量</span></div>
           <div className={`canvas-area tool-${tool}`}>
             {!image && <div className="empty-canvas"><div className="scan-grid" /><span className="crosshair" aria-hidden="true" /><p>等待图像</p><small>可直接选择 FV3000 .oir 原始文件</small></div>}
             {image && <div className="canvas-stack" style={{ aspectRatio: `${image.width}/${image.height}`, maxWidth: `${Math.min(previewSize.width, MAX_PREVIEW_HEIGHT * image.width / image.height)}px` }}><canvas ref={imageCanvas} /><canvas ref={overlayCanvas} aria-label={`在图像上绘制${tool === 'roi' ? '分析 ROI' : tool === 'background' ? '背景 ROI' : '线扫描'}`} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={event => { setDragStart(null); setDraft(null); setRoiMoveOffset(null); setRoiResize(null); event.currentTarget.style.cursor = ''; }} /></div>}
           </div>
           <div className="stage-tools" aria-label="绘图工具"><button className={tool === 'roi' ? 'selected' : ''} onClick={() => setTool('roi')}><b>□</b>{isColoc ? '分析 ROI' : '正方形裁剪'}</button><button className={tool === 'background' ? 'selected' : ''} onClick={() => setTool('background')}><b>▧</b>背景 ROI</button>{!isColoc && <button className={tool === 'line' ? 'selected' : ''} onClick={() => setTool('line')}><b>╱</b>线扫描</button>}<span className="tool-spacer" /><button onClick={() => setRoi(null)}>使用全图</button><button onClick={() => { setRoi(null); setBackgroundRoi(null); setScanLine(null); setSuppressDisplayBackground(false); }}>清除标注</button></div>
           <div className="stage-foot"><span>{isColoc ? 'ROI' : '正方形裁剪区'}：{roiText}{!isColoc && layoutReferenceCm !== null ? ` ｜ 排版 1:${layoutSizeRatio} → ${format(layoutReferenceCm, 4)} cm` : ''}</span>{!isColoc && <span>线长：{scanLine ? `${format(lineLength, 1)} px${pixelSize ? ` / ${format(lineLength * pixelSize, 2)} µm` : ''}` : '—'}</span>}<span>{isColoc ? `BG A/B：${format(background.a, 2)} / ${format(background.b, 2)}` : `定量背景：${backgroundLabels[backgroundMethod]}`}</span></div>
-          <div className="roi-export-panel"><div><strong>{roi ? isColoc ? `ROI ${Math.round(roi.width)} × ${Math.round(roi.height)} px` : `裁剪边长 ${roiSideLabel(roi.width, pixelSize, roiSizeUnit)}` : image ? `全图 ${image.width} × ${image.height} px` : '请先导入图片'}</strong><small>{!isColoc && intensityExportTarget === 'all' ? `批量：Merge + ${intensityChannels.length} 个已勾选单通道，装入一个 ZIP。` : '图片为伪彩；定量用 CSV / JSON。'}{showScaleBar ? ' 比例尺会写入图片。' : ''}</small></div><div className="roi-export-controls">{!isColoc && <select aria-label="导出内容" value={intensityExportTarget} disabled={!image || Boolean(exportingRoi)} onChange={event => { const target = event.target.value as IntensityExportTarget; setIntensityExportTarget(target); setView(target.startsWith('channel:') ? target as `channel:${string}` : 'overlay'); }}><option value="merge">Merge（已勾选通道）</option>{intensityChannels.map(({ channel, setting }) => <option key={channel.id} value={`channel:${channel.id}`}>{setting.label || channel.label}</option>)}<option value="all">全部：Merge + 单通道（ZIP）</option></select>}<div className="export-actions"><button disabled={!image || !channelConfirmed || Boolean(exportingRoi)} onClick={() => { void exportRoiImage('png'); }}>{exportingRoi === 'png' ? '处理中…' : '导出 PNG'}</button><button disabled={!image || !channelConfirmed || Boolean(exportingRoi)} onClick={() => { void exportRoiImage('jpg'); }}>{exportingRoi === 'jpg' ? '处理中…' : '导出 JPG'}</button><button disabled={!image || !channelConfirmed || Boolean(exportingRoi)} onClick={() => { void exportRoiImage('tiff'); }}>{exportingRoi === 'tiff' ? '处理中…' : '导出 TIFF'}</button></div></div></div>
+          <div className="roi-export-panel"><div><strong>{roi ? isColoc ? `ROI ${Math.round(roi.width)} × ${Math.round(roi.height)} px` : `裁剪边长 ${roiSideLabel(roi.width, pixelSize, roiSizeUnit)}` : image ? `全图 ${image.width} × ${image.height} px` : '请先导入图片'}</strong><small>{!isColoc && intensityExportTarget === 'all' ? `批量：Merge + ${intensityChannels.length} 个已勾选单通道，装入一个 ZIP。` : '图片为伪彩；定量用 CSV / JSON。'}{showScaleBar ? ' 比例尺会写入图片。' : ''}</small></div><div className="roi-export-controls">{!isColoc && <select aria-label="导出内容" value={intensityExportTarget} disabled={!image || Boolean(exportingRoi)} onChange={event => selectIntensityView(event.target.value as IntensityExportTarget)}><option value="merge">Merge（已勾选通道）</option>{intensityChannels.map(({ channel, setting }) => <option key={channel.id} value={`channel:${channel.id}`}>{setting.label || channel.label}</option>)}<option value="all">全部：Merge + 单通道（ZIP）</option></select>}<div className="export-actions"><button disabled={!image || !channelConfirmed || Boolean(exportingRoi)} onClick={() => { void exportRoiImage('png'); }}>{exportingRoi === 'png' ? '处理中…' : '导出 PNG'}</button><button disabled={!image || !channelConfirmed || Boolean(exportingRoi)} onClick={() => { void exportRoiImage('jpg'); }}>{exportingRoi === 'jpg' ? '处理中…' : '导出 JPG'}</button><button disabled={!image || !channelConfirmed || Boolean(exportingRoi)} onClick={() => { void exportRoiImage('tiff'); }}>{exportingRoi === 'tiff' ? '处理中…' : '导出 TIFF'}</button></div></div></div>
           <ExportLocation />
         </div>
 
