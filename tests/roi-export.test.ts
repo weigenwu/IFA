@@ -5,7 +5,7 @@ import { fromArrayBuffer } from 'geotiff';
 
 import { intensityStats, positionPixelRoi, type ChannelData } from '../lib/analysis.ts';
 import type { LoadedImage } from '../lib/image.ts';
-import { encodePseudocolorTiff, renderRoiPseudocolor, resolveDisplayRange, ROI_TIFF_DESCRIPTION } from '../lib/roi-export.ts';
+import { encodePseudocolorTiff, renderRoiPseudocolor, resolveDisplayRange, resolveRulerPixelSize, ROI_TIFF_DESCRIPTION } from '../lib/roi-export.ts';
 
 const channel = (id: string, values: number[]): ChannelData => ({
   id,
@@ -220,9 +220,17 @@ test('Merge and every single-channel export share the exact ROI and scale bar', 
   assert.deepEqual(Array.from(greenOnly.rgb.slice(0, 6)), [0, 0, 0, 0, 255, 0]);
 });
 
-test('679px crop exports a solid 100px ruler line and 20um label with reference parameters', async () => {
+test('ruler automatically uses a display reference only when calibration is missing', () => {
+  for (const missing of [null, undefined, 0, -1, NaN, Infinity]) assert.equal(resolveRulerPixelSize(missing), 0.2);
+  assert.equal(resolveRulerPixelSize(0.20716019800746), 0.20716019800746);
+  assert.equal(resolveRulerPixelSize(0.1, 0.3), 0.1);
+  assert.equal(resolveRulerPixelSize(null, 0.3), 0.3);
+  for (const invalid of [0, -1, NaN, Infinity]) assert.equal(resolveRulerPixelSize(null, invalid), 0.2);
+});
+
+test('679px crop exports a solid 100px ruler line and 20um label with automatic reference parameters', async () => {
   const source = image(679, 679, [channel('a', new Array(679 * 679).fill(0))]);
-  const rendered = renderRoiPseudocolor({ image: source, channels: [{ id: 'a', color: 'blue' }], pixelSizeUm: 0.2, scaleBarUm: 20 });
+  const rendered = renderRoiPseudocolor({ image: source, channels: [{ id: 'a', color: 'blue' }], pixelSizeUm: resolveRulerPixelSize(source.pixelSizeUm), scaleBarUm: 20 });
   assert.equal(source.pixelSizeUm, null, 'display reference must not calibrate source data');
   assert.equal(rendered.scaleBar?.label, '20 µm');
   assert.equal(rendered.scaleBar?.pixelLength, 100);

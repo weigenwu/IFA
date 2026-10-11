@@ -64,6 +64,12 @@ export interface RenderedRoi {
 
 export const ROI_TIFF_DESCRIPTION = 'FluoroScope ROI export; 8-bit RGB pseudocolor rendering; not raw quantitative fluorescence data.';
 
+/** Display-only reference fallback; never write this back as source calibration. */
+export function resolveRulerPixelSize(pixelSizeUm: number | null | undefined, referencePixelSizeUm = 0.2): number {
+  if (pixelSizeUm != null && Number.isFinite(pixelSizeUm) && pixelSizeUm > 0) return pixelSizeUm;
+  return Number.isFinite(referencePixelSizeUm) && referencePixelSizeUm > 0 ? referencePixelSizeUm : 0.2;
+}
+
 const PSEUDOCOLOR_RGB: Record<PseudocolorName, NormalizedRgb> = {
   green: [0, 1, 0],
   red: [1, 0, 0],

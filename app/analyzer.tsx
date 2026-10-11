@@ -25,7 +25,7 @@ import { createStoredZip, safeFilePart } from '../lib/export-archive';
 import { saveFile, type PreparedDownload } from '../lib/save-file';
 import { nextEnabledChannel } from '../lib/channel-navigation';
 import ExportLocation from './export-location';
-import { encodePseudocolorTiff, renderRoiPseudocolor, renderedRoiToBlob, resolveDisplayRange } from '../lib/roi-export';
+import { encodePseudocolorTiff, renderRoiPseudocolor, renderedRoiToBlob, resolveDisplayRange, resolveRulerPixelSize } from '../lib/roi-export';
 
 type Tool = 'roi' | 'background' | 'line';
 type View = 'overlay' | 'a' | 'b' | 'mask' | `channel:${string}`;
@@ -193,9 +193,8 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   const [displayBlackPoint, setDisplayBlackPoint] = useState(0);
   const [suppressDisplayBackground, setSuppressDisplayBackground] = useState(false);
   const [showScaleBar, setShowScaleBar] = useState(true);
-  const [useReferenceScale, setUseReferenceScale] = useState(false);
   const [referencePixelSize, setReferencePixelSize] = useState(0.2);
-  const rulerPixelSize = pixelSize > 0 ? pixelSize : useReferenceScale ? referencePixelSize : 0;
+  const rulerPixelSize = resolveRulerPixelSize(pixelSize, referencePixelSize);
   const [scaleBarUm, setScaleBarUm] = useState(20);
   const [layoutSizeRatio, setLayoutSizeRatio] = useState(1000);
   const [roiSizeUnit, setRoiSizeUnit] = useState<RoiSizeUnit>('px');
@@ -309,7 +308,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       const loadedPixelSize = loaded.pixelSizeUm ?? 0;
       setPixelSize(loadedPixelSize); setScaleBarUm(20);
       setDisplayBlackPoint(0); setSuppressDisplayBackground(false); setShowScaleBar(true); setAllowDisplayOnly(false);
-      setUseReferenceScale(false); setReferencePixelSize(0.2);
+      setReferencePixelSize(0.2);
       setRoiSizeUnit(loadedPixelSize > 0 ? 'um' : 'px'); setSquareSizeLocked(retainedCrop ? squareSizeLocked : false); setRoiTargetSidePx(retainedCrop?.width ?? Math.min(256, loaded.width, loaded.height)); setRoiMoveOffset(null); setRoiResize(null); setDraft(null); setDragStart(null);
       if (retainedCrop && image && (image.width !== loaded.width || image.height !== loaded.height)) {
         setError('新旧图片尺寸不同，已按原像素坐标保留裁剪框；请确认视野与缩放一致。');
@@ -731,7 +730,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       channels: mode === 'colocalization'
         ? { a: { id: channelA.id, sourceLabel: channelA.label, label: channelALabel, sourceColor: channelA.sourceColor, bitDepth: channelA.bitDepth }, b: { id: channelB.id, sourceLabel: channelB.label, label: channelBLabel, sourceColor: channelB.sourceColor, bitDepth: channelB.bitDepth } }
         : intensityChannels.map(({ channel, setting }) => ({ id: channel.id, sourceLabel: channel.label, label: setting.label || channel.label, sourceColor: channel.sourceColor, bitDepth: channel.bitDepth, displayColor: setting.color })),
-      parameters: { roi, backgroundRoi, backgroundMethod, background: mode === 'colocalization' ? background : Object.fromEntries(intensityChannels.map(({ channel }) => [channel.id, backgroundByChannel.get(channel.id) ?? { mean: 0, sd: 0 }])), thresholdMethod, manualThresholdPercent: { a: manualA, b: manualB }, displayColors: mode === 'colocalization' ? { a: displayColorA, b: displayColorB } : Object.fromEntries(intensityChannels.map(({ channel, setting }) => [channel.id, setting.color])), displayRanges: Object.fromEntries(channelSettings.map(setting => [setting.id, { min: setting.displayMin, max: setting.displayMax, preset: setting.displayPreset }])), displayBlackPointPercent: displayBlackPoint, displayBackgroundSuppression: { enabled: Boolean(suppressDisplayBackground && backgroundRoi), method: `background_roi_mean_plus_${DISPLAY_BACKGROUND_SD_MULTIPLIER}sd`, channels: Object.fromEntries(displayBackgroundByChannel) }, scaleBar: { shown: showScaleBar, lengthUm: scaleBarUm, mode: pixelSize > 0 ? 'calibrated' : useReferenceScale ? 'reference-unverified' : 'uncalibrated', displayPixelSizeUm: rulerPixelSize || null }, scanLine, lineChannels: { a: channelA.id, b: channelB.id }, lineWidthPx: lineWidth, gaussianSigmaPx: sigma, pixelSizeUm: pixelSize || null, comparison: 'strict >', costesSignificanceTest: false },
+      parameters: { roi, backgroundRoi, backgroundMethod, background: mode === 'colocalization' ? background : Object.fromEntries(intensityChannels.map(({ channel }) => [channel.id, backgroundByChannel.get(channel.id) ?? { mean: 0, sd: 0 }])), thresholdMethod, manualThresholdPercent: { a: manualA, b: manualB }, displayColors: mode === 'colocalization' ? { a: displayColorA, b: displayColorB } : Object.fromEntries(intensityChannels.map(({ channel, setting }) => [channel.id, setting.color])), displayRanges: Object.fromEntries(channelSettings.map(setting => [setting.id, { min: setting.displayMin, max: setting.displayMax, preset: setting.displayPreset }])), displayBlackPointPercent: displayBlackPoint, displayBackgroundSuppression: { enabled: Boolean(suppressDisplayBackground && backgroundRoi), method: `background_roi_mean_plus_${DISPLAY_BACKGROUND_SD_MULTIPLIER}sd`, channels: Object.fromEntries(displayBackgroundByChannel) }, scaleBar: { shown: showScaleBar, lengthUm: scaleBarUm, mode: Number.isFinite(pixelSize) && pixelSize > 0 ? 'calibrated' : 'reference-unverified', displayPixelSizeUm: rulerPixelSize || null }, scanLine, lineChannels: { a: channelA.id, b: channelB.id }, lineWidthPx: lineWidth, gaussianSigmaPx: sigma, pixelSizeUm: pixelSize || null, comparison: 'strict >', costesSignificanceTest: false },
       results: mode === 'colocalization' ? { colocalization: analysis.coloc } : { intensities: analysis.intensities, lineProfile: analysis.profile },
       warnings: [...image.warnings, ...(image.displayOnly ? ['本结果由展示图风险确认后生成，仅供探索。'] : []), ...(analysis.coloc?.warnings ?? []), ...(mode === 'colocalization' ? ['共定位不等于分子相互作用。'] : [])],
     };
@@ -742,7 +741,6 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     if (!image || !channelA || !channelB) { setError('请先导入图片。'); return; }
     if (!channelConfirmed) { setError('请先确认通道名称和伪彩。'); return; }
     if (!isColoc && !intensityChannels.length) { setError('请至少勾选 1 个要显示和导出的通道。'); return; }
-    if (showScaleBar && !(rulerPixelSize > 0)) { setError('请填写真实像素尺寸，或点击标尺设置中的“使用参考默认值”。'); return; }
     if (exportingRoi) return;
     setDownloadReady(null);
     setExportingRoi(format);
@@ -855,9 +853,9 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
 
   const referenceScaleControls = !(pixelSize > 0) && (
     <div className="field-help">
-      <button type="button" onClick={() => { setUseReferenceScale(true); setReferencePixelSize(0.2); setScaleBarUm(20); setShowScaleBar(true); setError(''); }}>使用参考默认值</button>
-      {useReferenceScale && <label className="number-field"><span>参考参数</span><input aria-label="标尺参考像素尺寸" type="number" min="0.000001" step="0.001" value={referencePixelSize} onChange={event => setReferencePixelSize(Math.max(0.000001, Number(event.target.value) || 0.2))} /><span>µm/px</span></label>}
-      <small>参考默认值 0.2 µm/px：20 µm 画为 100 px。仅示意，非仪器标定；不参与测量，说明不写入图片。</small>
+      <button type="button" onClick={() => { setReferencePixelSize(0.2); setScaleBarUm(20); setShowScaleBar(true); setError(''); }}>恢复参考默认值</button>
+      <label className="number-field"><span>参考参数</span><input aria-label="标尺参考像素尺寸" type="number" min="0.000001" step="0.001" value={referencePixelSize} onChange={event => setReferencePixelSize(resolveRulerPixelSize(null, Number(event.target.value)))} /><span>µm/px</span></label>
+      <small>无标定时自动使用参考值。默认 0.2 µm/px：20 µm 画为 100 px；仅示意，不参与测量，说明不写入图片。</small>
     </div>
   );
 
