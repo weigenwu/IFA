@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { calculateColocalization, displayWindow, fitSquareRoi, intensityStats, lineProfile, resizeSquareAtCenter, resizeSquareFromAnchor, type ChannelData } from '../lib/analysis.ts';
+import { calculateColocalization, displayWindow, fitSquareRoi, intensityStats, lineProfile, positionPixelRoi, resizeSquareAtCenter, resizeSquareFromAnchor, type ChannelData } from '../lib/analysis.ts';
 import { collapsePseudocolor } from '../lib/image.ts';
 import { parseOir } from '../lib/oir.ts';
 
@@ -78,6 +78,23 @@ test('intensity background correction keeps signed CTCF', () => {
 test('square ROI keeps its requested size when moved against image edges', () => {
   assert.deepEqual(fitSquareRoi(100, 80, 95, 75, 20), { x: 80, y: 60, width: 20, height: 20 });
   assert.deepEqual(fitSquareRoi(100, 80, -20, -10, 120), { x: 0, y: 0, width: 80, height: 80 });
+});
+
+test('typed XY and time-series reuse preserve exact pixel bounds without clamping', () => {
+  const roi = { x: 300, y: 400, width: 367, height: 367 };
+  const original = { ...roi };
+  const positioned = positionPixelRoi(2432, 2032, roi, 1795, 386)!;
+  assert.deepEqual(positioned, { x: 1795, y: 386, width: 367, height: 367 });
+  assert.deepEqual(positionPixelRoi(2432, 2032, positioned, positioned.x, positioned.y), positioned);
+  assert.deepEqual(positionPixelRoi(3000, 2500, positioned, positioned.x, positioned.y), positioned);
+  assert.deepEqual(positionPixelRoi(2432, 2032, roi, 2065, 1665), { x: 2065, y: 1665, width: 367, height: 367 });
+  assert.deepEqual(positionPixelRoi(367, 367, roi, 0, 0), { x: 0, y: 0, width: 367, height: 367 });
+  for (const [x, y] of [[-1, 0], [0, -1], [2066, 0], [0, 1666], [NaN, 0], [0, Infinity], [0.5, 0]]) {
+    assert.equal(positionPixelRoi(2432, 2032, roi, x, y), null);
+  }
+  assert.equal(positionPixelRoi(1024, 1024, positioned, positioned.x, positioned.y), null);
+  assert.equal(positionPixelRoi(366, 366, roi, 0, 0), null);
+  assert.deepEqual(roi, original);
 });
 
 test('square ROI corner resize keeps its opposite corner and stays inside the image', () => {

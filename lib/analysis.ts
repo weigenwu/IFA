@@ -82,6 +82,14 @@ export function fitSquareRoi(width: number, height: number, x: number, y: number
   };
 }
 
+// Exact pixel positioning must not silently shift or shrink a time-series crop.
+export function positionPixelRoi(width: number, height: number, roi: Rect, x: number, y: number): Rect | null {
+  if (![width, height, x, y, roi.width, roi.height].every(Number.isSafeInteger)
+    || width <= 0 || height <= 0 || roi.width <= 0 || roi.height <= 0
+    || x < 0 || y < 0 || x + roi.width > width || y + roi.height > height) return null;
+  return { ...roi, x, y };
+}
+
 export function resizeSquareAtCenter(width: number, height: number, roi: Rect | null, side: number): Rect {
   const fittedSide = clamp(Math.round(side), 1, Math.min(width, height));
   const centerX = roi ? roi.x + roi.width / 2 : width / 2;

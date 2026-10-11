@@ -9,6 +9,7 @@ import {
   intensityStats,
   lineProfile,
   percentileInRoi,
+  positionPixelRoi,
   resizeSquareAtCenter,
   resizeSquareFromAnchor,
   scatterSample,
@@ -199,6 +200,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   const [layoutSizeRatio, setLayoutSizeRatio] = useState(1000);
   const [roiSizeUnit, setRoiSizeUnit] = useState<RoiSizeUnit>('px');
   const [squareSizeLocked, setSquareSizeLocked] = useState(false);
+  const [keepCropOnLoad, setKeepCropOnLoad] = useState(false);
   const [roiTargetSidePx, setRoiTargetSidePx] = useState(256);
   const [intensityExportTarget, setIntensityExportTarget] = useState<IntensityExportTarget>('merge');
   const [exportingRoi, setExportingRoi] = useState<RoiExportFormat | null>(null);
@@ -290,6 +292,12 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     setLoading(true); setError(''); setAnalysis(null); setDownloadReady(null);
     try {
       const loaded = await loadImages(selected);
+      const previousCrop = !isColoc && keepCropOnLoad ? roi : null;
+      const retainedCrop = previousCrop ? positionPixelRoi(loaded.width, loaded.height, previousCrop, previousCrop.x, previousCrop.y) : null;
+      if (previousCrop && !retainedCrop) {
+        setError(`新图片 ${loaded.width} × ${loaded.height} px 放不下原裁剪框，未切换图片。请调整坐标或边长，或取消“换图保留位置和边长”后重试。`);
+        return;
+      }
       setImage(loaded);
       const settings = initialChannelSettings(loaded);
       setChannelSettings(settings); setChannelConfirmed(false); setDisplayChannelId(settings[0]?.id ?? '');
@@ -297,17 +305,20 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       const green = loaded.channels.find(channel => channel.id === 'green') ?? loaded.channels.find(channel => channel.id === fluorescence[0]?.id) ?? loaded.channels[0];
       const red = loaded.channels.find(channel => channel.id === 'red') ?? loaded.channels.find(channel => channel.id === fluorescence[1]?.id) ?? loaded.channels[1] ?? loaded.channels[0];
       setChannelAId(green.id); setChannelBId(red.id);
-      setRoi(null); setBackgroundRoi(null); setScanLine(null); setView('overlay'); setIntensityExportTarget('merge'); setTool('roi');
+      setRoi(retainedCrop); setBackgroundRoi(null); setScanLine(null); setView('overlay'); setIntensityExportTarget('merge'); setTool('roi');
       const loadedPixelSize = loaded.pixelSizeUm ?? 0;
       setPixelSize(loadedPixelSize); setScaleBarUm(20);
       setDisplayBlackPoint(0); setSuppressDisplayBackground(false); setShowScaleBar(true); setAllowDisplayOnly(false);
       setUseReferenceScale(false); setReferencePixelSize(0.2);
-      setRoiSizeUnit(loadedPixelSize > 0 ? 'um' : 'px'); setSquareSizeLocked(false); setRoiTargetSidePx(Math.min(256, loaded.width, loaded.height)); setRoiMoveOffset(null); setRoiResize(null);
+      setRoiSizeUnit(loadedPixelSize > 0 ? 'um' : 'px'); setSquareSizeLocked(retainedCrop ? squareSizeLocked : false); setRoiTargetSidePx(retainedCrop?.width ?? Math.min(256, loaded.width, loaded.height)); setRoiMoveOffset(null); setRoiResize(null); setDraft(null); setDragStart(null);
+      if (retainedCrop && image && (image.width !== loaded.width || image.height !== loaded.height)) {
+        setError('新旧图片尺寸不同，已按原像素坐标保留裁剪框；请确认视野与缩放一致。');
+      }
     } catch (problem) {
       setImage(null);
       setError(problem instanceof Error ? problem.message : '无法读取该图像。');
     } finally { setLoading(false); }
-  }, []);
+  }, [isColoc, keepCropOnLoad, roi, squareSizeLocked, image]);
 
   useEffect(() => {
     const canvas = imageCanvas.current;
@@ -821,6 +832,25 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur(); }
     }}
   />;
+  const roiPositionInput = (axis: 'x' | 'y') => <input
+    key={`${image?.hash}:${axis}:${roi?.[axis]}`}
+    aria-label={`裁剪框 ${axis.toUpperCase()} 坐标（px）`}
+    title="裁剪框左上角的原图像素坐标；回车应用，Esc 取消"
+    type="number" min="0" max={image && roi ? (axis === 'x' ? image.width - roi.width : image.height - roi.height) : 0} step="1"
+    defaultValue={roi?.[axis] ?? ''} disabled={!roi || loading} placeholder="先框选"
+    onBlur={event => {
+      if (!image || !roi || event.currentTarget.value === String(roi[axis])) return;
+      const value = event.currentTarget.valueAsNumber;
+      const moved = positionPixelRoi(image.width, image.height, roi, axis === 'x' ? value : roi.x, axis === 'y' ? value : roi.y);
+      if (moved) { setRoi(moved); setError(''); }
+      else setError(`${axis.toUpperCase()} 请输入 0–${axis === 'x' ? image.width - roi.width : image.height - roi.height} 范围内的整数，裁剪框未移动。`);
+      event.currentTarget.value = String(moved?.[axis] ?? roi[axis]);
+    }}
+    onKeyDown={event => {
+      if (event.key === 'Escape') { event.currentTarget.value = String(roi?.[axis] ?? ''); event.currentTarget.blur(); }
+      if (event.key === 'Enter') { event.preventDefault(); event.currentTarget.blur(); }
+    }}
+  />;
   const layoutReferenceCm = roi && pixelSize > 0 ? roi.width * pixelSize * layoutSizeRatio / 10000 : null;
 
   const referenceScaleControls = !(pixelSize > 0) && (
@@ -938,6 +968,12 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
             <div className="metric-row"><div className="metric"><small>CTCF</small><strong>{primaryIntensity ? format(primaryIntensity.ctcf, 1) : '—'}</strong><span>{primaryIntensityLabel}</span></div><div className="metric"><small>饱和</small><strong>{primaryIntensity ? `${format(primaryIntensity.saturationPct, 2)}%` : '—'}</strong><span>有效位深上限</span></div></div>
             <div className="quick-stats"><span><small>ROI 像素</small><b>{primaryIntensity ? primaryIntensity.pixels.toLocaleString() : '—'}</b></span><span><small>所选通道</small><b>{enabledIntensityIds.length}</b></span><span><small>正方形边长</small>{image && roi ? <><label className="roi-side-editor">{roiSideInput('正方形边长')}<em>{ROI_UNIT_LABELS[roiSizeUnit]}</em></label><small className="roi-side-equivalent">{roiSizeUnit === 'px' ? pixelSize > 0 ? `${format(roi.width * pixelSize, 2)} µm` : '' : `${Math.round(roi.width)} px`}</small></> : <b>全图</b>}</span></div>
           </>}
+          {!isColoc && image && <div className="roi-position-panel">
+            <div className="roi-position-fields"><label>X（px）{roiPositionInput('x')}</label><label>Y（px）{roiPositionInput('y')}</label></div>
+            <small>框左上角坐标：原图左上为 (0, 0)，X 向右、Y 向下。</small>
+            <label className="scale-toggle"><input type="checkbox" checked={keepCropOnLoad} disabled={loading} onChange={event => setKeepCropOnLoad(event.target.checked)} /><span>换图保留位置和边长</span></label>
+            {keepCropOnLoad && <small>按原图像素复用；不自动校正视野漂移。</small>}
+          </div>}
           {error && <p className="error-message" role="alert">{error}</p>}
           {downloadReady && <div className="download-ready" role="status"><strong>文件已生成</strong><small title={downloadReady.name}>{downloadReady.name}</small><a href={downloadReady.url} download={downloadReady.name}>点击下载文件</a><p>若未自动下载，请点上方按钮。保存位置由微信 / 浏览器决定。</p></div>}
           <button className="analyze-button" onClick={runAnalysis} disabled={!image || !channelConfirmed || busy || loading || Boolean(image?.displayOnly && !allowDisplayOnly)}>{busy ? '正在计算…' : image && !channelConfirmed ? '先确认通道' : image ? `运行${isColoc ? '共定位' : '强度'}分析` : '载入图像后分析'} <span>→</span></button>

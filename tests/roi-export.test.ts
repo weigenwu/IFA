@@ -3,7 +3,7 @@ import test from 'node:test';
 
 import { fromArrayBuffer } from 'geotiff';
 
-import { intensityStats, type ChannelData } from '../lib/analysis.ts';
+import { intensityStats, positionPixelRoi, type ChannelData } from '../lib/analysis.ts';
 import type { LoadedImage } from '../lib/image.ts';
 import { encodePseudocolorTiff, renderRoiPseudocolor, resolveDisplayRange, ROI_TIFF_DESCRIPTION } from '../lib/roi-export.ts';
 
@@ -57,6 +57,26 @@ test('ROI render returns the exact clamped source rectangle at original resoluti
   assert.equal(rendered.width, 4);
   assert.equal(rendered.height, 2);
   assert.equal(rendered.rgb.length, 4 * 2 * 3);
+});
+
+test('different time points export the identical XY crop with their own pixel values', async () => {
+  const roi = { x: 2, y: 1, width: 2, height: 2 };
+  for (const offset of [0, 100]) {
+    const source = image(6, 5, [channel('a', Array.from({ length: 30 }, (_, index) => offset + index))]);
+    const retained = positionPixelRoi(source.width, source.height, roi, roi.x, roi.y)!;
+    const rendered = renderRoiPseudocolor({
+      image: source, roi: retained,
+      channels: [{ id: 'a', color: 'red', displayMin: 0, displayMax: 255 }],
+    });
+    assert.deepEqual(rendered.sourceRoi, roi);
+    const expected = [8, 9, 14, 15].flatMap(value => [value + offset, 0, 0]);
+    assert.deepEqual(Array.from(rendered.rgb), expected);
+    const tiff = await fromArrayBuffer(await encodePseudocolorTiff(rendered));
+    const page = await tiff.getImage();
+    assert.equal(page.getWidth(), 2);
+    assert.equal(page.getHeight(), 2);
+    assert.deepEqual(Array.from(await page.readRasters({ interleave: true })), expected);
+  }
 });
 
 test('single-channel view and black point affect pseudocolor pixels only', () => {
