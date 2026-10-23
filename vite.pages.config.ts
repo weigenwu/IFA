@@ -17,7 +17,7 @@ export default defineConfig({
     {
       name: 'github-pages-routes',
       closeBundle() {
-        for (const route of ['colocalization', 'intensity']) {
+        for (const route of ['colocalization', 'intensity', 'edu']) {
           mkdirSync(`${output}/${route}`, { recursive: true });
           copyFileSync(`${output}/index.html`, `${output}/${route}/index.html`);
         }

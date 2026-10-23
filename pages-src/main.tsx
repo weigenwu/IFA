@@ -3,12 +3,15 @@ import { createRoot } from 'react-dom/client';
 
 import Analyzer from '../app/analyzer';
 import IntensityAnalyzer from '../app/intensity-analyzer';
+import EduAnalyzer from '../app/edu-analyzer';
 import '../app/globals.css';
 import Home from '../app/page';
 
 const path = window.location.pathname.replace(/\/+$/, '');
 const page = path.endsWith('/colocalization')
   ? <Analyzer mode="colocalization" />
+  : path.endsWith('/edu')
+    ? <EduAnalyzer />
   : path.endsWith('/intensity')
     ? <IntensityAnalyzer />
     : <Home />;

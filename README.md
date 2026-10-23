@@ -1,5 +1,7 @@
 # FluoroScope
 
+新增入口：[EdU 分析与去杂色](https://weigenwu.github.io/IFA/edu/)。支持文件夹按视野导入、红色碎片显示清理、核候选与 EdU 阳性比例、人工复核及 CSV/JSON 导出；全部在浏览器本地处理。详见 [EdU 方法与使用边界](docs/EDU_METHOD.md)。
+
 两个在浏览器本地运行的免疫荧光分析工具：**荧光共定位**与**荧光强度/线扫描**。Olympus FV3000 OIR 和 TIFF 图像都不会上传到服务器，也不需要账号登录；原始像素用于计算，画布仅用于显示。
 
 **公开入口（无需登录）：<https://weigenwu.github.io/IFA/>**

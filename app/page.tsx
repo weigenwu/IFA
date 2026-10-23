@@ -3,7 +3,7 @@ export default function Home() {
     <main className="app-shell portal-shell">
       <header className="topbar">
         <a className="brand" href="./" aria-label="FluoroScope 首页"><span className="brand-mark" aria-hidden="true"><i /><i /></span><span>FluoroScope</span></a>
-        <nav aria-label="分析工具"><a href="./colocalization/">荧光共定位</a><a href="./intensity/">荧光强度</a></nav>
+        <nav aria-label="分析工具"><a href="./colocalization/">荧光共定位</a><a href="./intensity/">荧光强度</a><a href="./edu/">EdU / 去杂色</a></nav>
         <span className="privacy-badge"><i /> 公开使用 · 无需登录</span>
       </header>
 
@@ -27,6 +27,12 @@ export default function Home() {
           <div className="line-glyph" aria-hidden="true"><i /><i /><i /><i /><i /></div>
           <h2>荧光强度</h2>
           <p>多通道伪彩、背景、ROI 强度与裁图。</p>
+          <strong>打开 <span>→</span></strong>
+        </a>
+        <a className="tool-card intensity-tool" href="./edu/">
+          <span className="tool-index">03 · EdU & BACKGROUND</span>
+          <h2>EdU 分析与去杂色</h2>
+          <p>文件夹导入、碎点清理、核分割与阳性率。</p>
           <strong>打开 <span>→</span></strong>
         </a>
       </section>
