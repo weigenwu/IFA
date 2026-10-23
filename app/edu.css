@@ -177,3 +177,10 @@
   .edu-channel-title { height:31px; font-size:11px; }
   .edu-three .edu-channel-viewport.is-zoomed { height:230px; }
 }
+.edu-display-queue { display:flex; align-items:center; justify-content:space-between; gap:12px; margin:12px 0 16px; font-size:10px; color:#869c8d; }
+.edu-display-queue a { color:#197d67; text-underline-offset:3px; }
+.edu-three .edu-main-actions { row-gap:7px; }
+.edu-three .edu-main-actions button { padding-left:9px; padding-right:9px; }
+@media (min-width:1251px) { .edu-three .edu-main-actions button:last-child { flex-basis:100%; } }
+@media (max-width:1250px) { .edu-three .edu-display-queue { grid-column:1 / -1; margin:0 0 12px; }.edu-three .edu-main-actions { min-width:285px; }.edu-three .edu-primary-controls { gap:15px; } }
+@media (max-width:760px) { .edu-three .edu-primary-controls { flex-wrap:wrap; }.edu-three .edu-main-actions { min-width:0; width:100%; max-width:none; margin-left:0; }.edu-three .edu-main-control { max-width:none; }.edu-three .edu-primary-controls>.edu-check { margin-right:auto; } }
