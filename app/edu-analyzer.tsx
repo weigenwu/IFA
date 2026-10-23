@@ -19,6 +19,7 @@ type RecordResult = {
 const INITIAL: EduParameters = { nucleusThreshold: 28, eduThreshold: 36, minArea: 45, maxArea: 8000, median: true, excludeEdge: true, minPositiveFraction: 0.2 };
 const INITIAL_EXCLUSION: Exclusion = { enabled: true, width: 128, height: 48 };
 const SUPPORTED = /\.(tiff?|png|jpe?g|oir)$/i;
+const DISPLAY_CHANNELS = ['DAPI', 'RED', 'Merge'] as const;
 const pause = () => new Promise<void>(resolve => requestAnimationFrame(() => resolve()));
 
 function groupFiles(files: File[]): Field[] {
@@ -114,7 +115,10 @@ export default function EduAnalyzer() {
   const [busy, setBusy] = useState(''), [message, setMessage] = useState(''), [error, setError] = useState('');
   const [acknowledged, setAcknowledged] = useState(false), [group, setGroup] = useState('');
   const [selected, setSelected] = useState<number | null>(null);
-  const canvas = useRef<HTMLCanvasElement>(null), folderInput = useRef<HTMLInputElement>(null), filesInput = useRef<HTMLInputElement>(null);
+  const canvases = useRef<Array<HTMLCanvasElement | null>>([]), folderInput = useRef<HTMLInputElement>(null), filesInput = useRef<HTMLInputElement>(null);
+  const imagePanes = useRef<Array<HTMLDivElement | null>>([]);
+  const expectedScroll = useRef(new WeakMap<HTMLDivElement, { left: number; top: number }>());
+  const scrollPosition = useRef({ x: 0, y: 0 });
   const channelDetails = useRef<HTMLDetailsElement>(null);
   const loadToken = useRef(0);
   const nucleus = image?.channels[nucleusIndex], edu = image?.channels[eduIndex];
@@ -134,6 +138,7 @@ export default function EduAnalyzer() {
 
   async function openField(queue: Field[], selectedIndex: number) {
     const token = ++loadToken.current;
+    scrollPosition.current = { x: 0, y: 0 };
     if (isDemo) setExclusion(INITIAL_EXCLUSION);
     setBusy('正在读取图像…'); setError(''); setImage(null); setResult(null); setCleaned(null); setRevisions({}); setSelected(null); setAcknowledged(false); setView('raw'); setIsDemo(false); setIndex(selectedIndex);
     try {
@@ -155,7 +160,7 @@ export default function EduAnalyzer() {
     await openField(queue, 0);
   }
   function openDemo() {
-    ++loadToken.current; const demo = demoImage(); setImage(demo); setFields([]); setIndex(-1); setIsDemo(true); setNucleusIndex(1); setEduIndex(0); setParameters(INITIAL); setExclusion({ ...INITIAL_EXCLUSION, enabled: false }); setResult(null); setCleaned(null); setRevisions({}); setRecords({}); setAcknowledged(true); setGroup('合成演示'); setView('raw'); setError(''); setMessage('演示图：40 个核，14 个 EdU 阳性。');
+    scrollPosition.current = { x: 0, y: 0 }; ++loadToken.current; const demo = demoImage(); setImage(demo); setFields([]); setIndex(-1); setIsDemo(true); setNucleusIndex(1); setEduIndex(0); setParameters(INITIAL); setExclusion({ ...INITIAL_EXCLUSION, enabled: false }); setResult(null); setCleaned(null); setRevisions({}); setRecords({}); setAcknowledged(true); setGroup('合成演示'); setView('raw'); setError(''); setMessage('演示图：40 个核，14 个 EdU 阳性。');
   }
   const nativeParameters = (): EduParameters => ({ ...parameters, nucleusThreshold: parameters.nucleusThreshold / 255 * (nucleus?.maxValue ?? 255), eduThreshold: parameters.eduThreshold / 255 * (edu?.maxValue ?? 255) });
   async function analyze() {
@@ -227,37 +232,76 @@ export default function EduAnalyzer() {
     download(new Blob([JSON.stringify({ schema: 'fluoroscope-edu-display-v1', timestamp: new Date().toISOString(), purpose: 'Display derivative only, not for quantitative analysis', sourceFiles: fields[index]?.files.map(file => file.webkitRelativePath || file.name) ?? image.sourceFiles, sourceHash: image.hash, synthetic: isDemo, dimensions: [image.width, image.height], channels: { nucleus: nucleus.label, edu: edu.label }, display: { redFloor, blueFloor, thresholdUiScale: '0..255 normalized to channel full scale', redMinArea: speckle, blueMinArea: blueSpeckle, protectNuclear, onlyNuclear, nucleusSupportThreshold: parameters.nucleusThreshold, nucleusSupportMinArea: parameters.minArea, nucleusFullScale: nucleus.maxValue, eduFullScale: edu.maxValue, exportChannels, greenPreserved: exportChannels === 'merge' && Boolean(preservedGreen), outputBitDepth: 8 }, warnings: image.warnings }, null, 2)], { type: 'application/json' }), 'EdU_display-cleaned_参数.json');
   }
 
+  function syncScroll(source: HTMLDivElement) {
+    const expected = expectedScroll.current.get(source);
+    if (expected && Math.abs(source.scrollLeft - expected.left) < 1 && Math.abs(source.scrollTop - expected.top) < 1) return;
+    const x = source.scrollLeft / Math.max(1, source.scrollWidth - source.clientWidth);
+    const y = source.scrollTop / Math.max(1, source.scrollHeight - source.clientHeight);
+    scrollPosition.current = { x, y };
+    for (const pane of imagePanes.current) {
+      if (!pane || pane === source) continue;
+      pane.scrollLeft = x * Math.max(0, pane.scrollWidth - pane.clientWidth);
+      pane.scrollTop = y * Math.max(0, pane.scrollHeight - pane.clientHeight);
+      expectedScroll.current.set(pane, { left: pane.scrollLeft, top: pane.scrollTop });
+    }
+  }
+
   useEffect(() => {
-    if (!image || !nucleus || !edu || !canvas.current) return;
-    const target = canvas.current; target.width = image.width; target.height = image.height;
-    const context = target.getContext('2d'); if (!context) return;
-    const pixels = context.createImageData(image.width, image.height);
+    const frame = requestAnimationFrame(() => {
+      for (const pane of imagePanes.current) {
+        if (!pane) continue;
+        pane.scrollLeft = scrollPosition.current.x * Math.max(0, pane.scrollWidth - pane.clientWidth);
+        pane.scrollTop = scrollPosition.current.y * Math.max(0, pane.scrollHeight - pane.clientHeight);
+        expectedScroll.current.set(pane, { left: pane.scrollLeft, top: pane.scrollTop });
+      }
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [zoom, image]);
+
+  useEffect(() => {
+    if (!image || !nucleus || !edu) return;
+    const contexts = canvases.current.map(target => {
+      if (!target) return null;
+      target.width = image.width; target.height = image.height;
+      return target.getContext('2d');
+    });
+    const first = contexts[0]; if (!first) return;
+    // Reuse one full-resolution RGBA buffer across all three channel views.
+    const pixels = first.createImageData(image.width, image.height);
     const blue = view === 'clean' && cleaned ? cleaned.nucleus : nucleus.data;
     const red = view === 'clean' && cleaned ? cleaned.edu : edu.data;
     const labels = view === 'mask' ? result?.labels : null;
     const classification = new Uint8Array((result?.nuclei.length ?? 0) + 1);
     if (result) for (const cell of result.nuclei) classification[cell.id] = revisions[cell.id] === 'exclude' ? 3 : revisions[cell.id] === 'positive' || (!revisions[cell.id] && cell.positive) ? 1 : 2;
-    for (let i = 0; i < red.length; i++) {
-      const at = i * 4; pixels.data[at] = red[i] / edu.maxValue * 255; pixels.data[at + 1] = preservedGreen ? preservedGreen.data[i] / preservedGreen.maxValue * 255 : 0; pixels.data[at + 2] = blue[i] / nucleus.maxValue * 255; pixels.data[at + 3] = 255;
-      const label = labels?.[i] ?? 0;
-      if (label && (i % image.width === 0 || i % image.width === image.width - 1 || i < image.width || i >= red.length - image.width || labels![i - 1] !== label || labels![i + 1] !== label || labels![i - image.width] !== label || labels![i + image.width] !== label)) {
-        const state = classification[label]; pixels.data[at] = state === 1 ? 255 : state === 3 ? 150 : 40; pixels.data[at + 1] = state === 1 ? 211 : state === 3 ? 150 : 240; pixels.data[at + 2] = state === 1 ? 40 : state === 3 ? 150 : 205;
+    contexts.forEach((context, panel) => {
+      if (!context) return;
+      const merge = panel === 2;
+      for (let i = 0; i < red.length; i++) {
+        const at = i * 4;
+        pixels.data[at] = panel === 0 ? 0 : red[i] / edu.maxValue * 255;
+        pixels.data[at + 1] = merge && preservedGreen ? preservedGreen.data[i] / preservedGreen.maxValue * 255 : 0;
+        pixels.data[at + 2] = panel === 1 ? 0 : blue[i] / nucleus.maxValue * 255;
+        pixels.data[at + 3] = 255;
+        const label = merge ? labels?.[i] ?? 0 : 0;
+        if (label && (i % image.width === 0 || i % image.width === image.width - 1 || i < image.width || i >= red.length - image.width || labels![i - 1] !== label || labels![i + 1] !== label || labels![i - image.width] !== label || labels![i + image.width] !== label)) {
+          const state = classification[label]; pixels.data[at] = state === 1 ? 255 : state === 3 ? 150 : 40; pixels.data[at + 1] = state === 1 ? 211 : state === 3 ? 150 : 240; pixels.data[at + 2] = state === 1 ? 40 : state === 3 ? 150 : 205;
+        }
       }
-    }
-    context.putImageData(pixels, 0, 0);
-    if (view === 'mask' && exclusion.enabled) {
-      const w = Math.min(image.width, exclusion.width), h = Math.min(image.height, exclusion.height);
-      context.fillStyle = '#ffffff28'; context.fillRect(image.width - w, image.height - h, w, h); context.strokeStyle = '#ff9a4f'; context.lineWidth = 3; context.strokeRect(image.width - w, image.height - h, w, h);
-    }
-    if (view === 'mask' && result) {
-      context.font = `${Math.max(11, Math.round(image.width / 220))}px sans-serif`; context.textAlign = 'center';
-      for (const cell of result.nuclei) { context.fillStyle = cell.id === selected ? '#ffffff' : '#fff9'; context.fillText(String(cell.id), cell.x, cell.y); }
-    }
+      context.putImageData(pixels, 0, 0);
+      if (!merge || view !== 'mask') return;
+      if (exclusion.enabled) {
+        const w = Math.min(image.width, exclusion.width), h = Math.min(image.height, exclusion.height);
+        context.fillStyle = '#ffffff28'; context.fillRect(image.width - w, image.height - h, w, h); context.strokeStyle = '#ff9a4f'; context.lineWidth = 3; context.strokeRect(image.width - w, image.height - h, w, h);
+      }
+      if (result) {
+        context.font = `${Math.max(11, Math.round(image.width / 220))}px sans-serif`; context.textAlign = 'center';
+        for (const cell of result.nuclei) { context.fillStyle = cell.id === selected ? '#ffffff' : '#fff9'; context.fillText(String(cell.id), cell.x, cell.y); }
+      }
+    });
   }, [image, nucleus, edu, preservedGreen, view, cleaned, result, revisions, selected, exclusion]);
-
   const selectedCell = result?.nuclei.find(cell => cell.id === selected);
   const fieldLabel = isDemo ? '合成演示' : `${index + 1} / ${fields.length}`;
-  return <div className="edu-app edu-compact">
+  return <div className="edu-app edu-compact edu-three">
     <header className="edu-header"><a className="edu-brand" href="../"><span className="edu-brand-icon">✳</span> FluoroScope</a><nav><a href="../intensity/">荧光强度</a><a href="../colocalization/">共定位</a><a href="../edu/" aria-current="page">EdU</a></nav><span className="edu-local"><i /> 图像仅在本地处理</span></header>
     <main className="edu-main">
       <div className="edu-heading"><h1>EdU 去碎片</h1><div className="edu-heading-actions"><button className="edu-quiet" onClick={openDemo} disabled={!!busy}>演示</button><button onClick={() => filesInput.current?.click()} disabled={!!busy}>选择图像</button><button className="edu-primary" onClick={() => folderInput.current?.click()} disabled={!!busy}>导入文件夹</button></div></div>
@@ -268,7 +312,7 @@ export default function EduAnalyzer() {
       <div className="edu-workspace">
         <aside className="edu-controls edu-panel">
           {fields.length > 0 && <div className="edu-queue"><select aria-label="视野队列" value={index} disabled={!!busy} onChange={event => void openField(fields, Number(event.target.value))}>{fields.map((field, i) => <option key={field.id} value={i}>{records[field.id] ? '✓ ' : ''}{field.name}</option>)}</select><div className="edu-queue-nav"><button aria-label="上一个视野" disabled={!!busy || index <= 0} onClick={() => void openField(fields, index - 1)}>←</button><span>{index + 1} / {fields.length}</span><button aria-label="下一个视野" disabled={!!busy || index >= fields.length - 1} onClick={() => void openField(fields, index + 1)}>→</button></div></div>}
-          <fieldset disabled={!image || !!busy}>
+          <fieldset className="edu-primary-controls" disabled={!image || !!busy}>
             <label className="edu-main-control">去除小于此面积的红色碎片<div className="edu-input-unit"><input aria-label="红色颗粒最小面积" type="number" min="1" max="100000" value={speckle} onChange={event => { setSpeckle(Math.max(1, Math.round(+event.target.value))); setCleaned(null); }} /><span>px²</span></div></label>
             <label className="edu-check"><input type="checkbox" checked={protectNuclear} onChange={event => { setProtectNuclear(event.target.checked); setCleaned(null); }} />保护核内信号</label>
             <div className="edu-button-row edu-main-actions"><button className="edu-primary" aria-label="生成去杂点预览" onClick={() => void clean()}>预览</button><button disabled={!cleaned || !!busy} aria-label="展示 PNG" onClick={() => void exportCleaned()}>导出 PNG</button></div>
@@ -297,8 +341,15 @@ export default function EduAnalyzer() {
         </aside>
         <div className="edu-stage-column">
           <section className="edu-stage"><div className="edu-stage-toolbar"><div className="edu-tabs">{([['raw', '原图'], ['clean', '去碎片'], ['mask', '计数']] as const).filter(([key]) => key !== 'mask' || result).map(([key, label]) => <button key={key} aria-pressed={view === key} disabled={!image || !!busy || (key === 'clean' && !cleaned)} onClick={() => setView(key)}>{label}</button>)}</div><select aria-label="缩放" value={zoom} onChange={event => setZoom(event.target.value)}><option value="fit">适应视野</option><option value="0.5">50%</option><option value="1">100%</option><option value="2">200%</option></select></div>
-            <div className={`edu-canvas-wrap ${!image ? 'is-empty' : ''}`} aria-busy={!!busy}>{image ? <canvas ref={canvas} aria-label="荧光图像，计数标记视图可点击细胞核修订" style={zoom === 'fit' ? { width: '100%', height: 'auto' } : { width: image.width * +zoom, height: image.height * +zoom, maxWidth: 'none' }} onClick={event => { if (view !== 'mask' || !result || busy) return; const bounds = event.currentTarget.getBoundingClientRect(); const x = Math.floor((event.clientX - bounds.left) / bounds.width * image.width), y = Math.floor((event.clientY - bounds.top) / bounds.height * image.height); const id = result.labels[y * image.width + x]; if (id) revise(id); }} /> : <div className="edu-empty"><div className="edu-cell-art">{Array.from({ length: 16 }, (_, i) => <i key={i} style={{ left: `${13 + (i % 4) * 22 + (i % 3) * 2}%`, top: `${8 + Math.floor(i / 4) * 24}%`, width: 16 + (i % 3) * 8, height: 22 + (i % 4) * 5, transform: `rotate(${i * 31}deg)` }} />)}</div><h2>选择图像开始</h2><p>TIFF · PNG · JPEG · OIR</p></div>}{busy && <div className="edu-processing" role="status"><span />{busy}</div>}</div>
-            {image && <div className="edu-image-meta"><span>{fieldLabel} · {image.width} × {image.height} px</span><span>{view === 'clean' ? '展示副本 · 原图保留' : view === 'mask' ? '点击核：阳性 → 阴性 → 排除 → 自动' : image.format}</span></div>}
+            <div className="edu-gallery-container" aria-busy={!!busy}>
+              {image ? <div className="edu-channel-gallery">{DISPLAY_CHANNELS.map((channel, panel) => <section className="edu-channel-panel" key={channel}>
+                <h2 className={`edu-channel-title channel-${panel}`}>{channel}</h2>
+                <div role="region" tabIndex={0} aria-label={`${channel} 图像滚动区域`} className={`edu-channel-viewport ${zoom === 'fit' ? 'is-fit' : 'is-zoomed'}`} ref={element => { imagePanes.current[panel] = element; }} style={zoom === 'fit' ? { aspectRatio: `${image.width} / ${image.height}` } : undefined} onScroll={event => syncScroll(event.currentTarget)}>
+                  <canvas ref={element => { canvases.current[panel] = element; }} aria-label={panel === 2 ? 'Merge，计数视图可点击细胞核修订' : `${channel} 通道图像`} style={zoom === 'fit' ? { width: '100%', height: 'auto' } : { width: image.width * +zoom, height: image.height * +zoom }} onClick={event => { if (panel !== 2 || view !== 'mask' || !result || busy) return; const bounds = event.currentTarget.getBoundingClientRect(); const x = Math.floor((event.clientX - bounds.left) / bounds.width * image.width), y = Math.floor((event.clientY - bounds.top) / bounds.height * image.height); const id = result.labels[y * image.width + x]; if (id) revise(id); }} />
+                </div>
+              </section>)}</div> : <div className="edu-canvas-wrap is-empty"><div className="edu-empty"><div className="edu-cell-art">{Array.from({ length: 16 }, (_, i) => <i key={i} style={{ left: `${13 + (i % 4) * 22 + (i % 3) * 2}%`, top: `${8 + Math.floor(i / 4) * 24}%`, width: 16 + (i % 3) * 8, height: 22 + (i % 4) * 5, transform: `rotate(${i * 31}deg)` }} />)}</div><h2>选择图像开始</h2><p>DAPI · RED · Merge</p></div></div>}
+              {busy && <div className="edu-processing" role="status"><span />{busy}</div>}
+            </div>            {image && <div className="edu-image-meta"><span>{fieldLabel} · {image.width} × {image.height} px</span><span>{view === 'clean' ? '展示副本 · 原图保留' : view === 'mask' ? '点击核：阳性 → 阴性 → 排除 → 自动' : image.format}</span></div>}
           </section>
           {result && <><div className="edu-stats"><article><span>总细胞核</span><strong>{totals?.total}</strong></article><article><span><i className="edu-dot yellow" /> EdU 阳性</span><strong>{totals?.positive}</strong></article><article className="edu-stat-primary"><span>阳性率</span><strong>{totals?.positivePct === null || !totals ? '—' : `${totals.positivePct.toFixed(1)}%`}</strong></article><article><span>人工修订</span><strong>{Object.keys(revisions).length}</strong></article></div><div className="edu-result-note"><span>● 阳性　<span className="edu-negative">● 阴性</span>　<span className="edu-excluded">● 排除</span></span><p>{result.warnings.join(' ')} 粘连核可能合并计数，请放大复核。</p></div></>}
           {selectedCell && <div className="edu-selection"><span>核 #{selectedCell.id} · {selectedCell.area} px² · EdU {Math.round(selectedCell.eduPositiveFraction * 100)}% · {revisions[selectedCell.id] ?? (selectedCell.positive ? '自动阳性' : '自动阴性')}</span><div>{(['positive', 'negative', 'exclude'] as const).map((state, i) => <button key={state} onClick={() => revise(selectedCell.id, state)}>{['设为阳性', '设为阴性', '排除'][i]}</button>)}</div></div>}
@@ -309,4 +360,3 @@ export default function EduAnalyzer() {
     </main>
   </div>;
 }
-

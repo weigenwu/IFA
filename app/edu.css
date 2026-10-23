@@ -135,3 +135,45 @@
 .edu-compact .edu-export-row { justify-content:flex-end; }
 @media (max-width:1050px) { .edu-compact .edu-workspace { grid-template-columns:235px minmax(0,1fr); gap:15px; }.edu-compact .edu-controls { padding:15px; } }
 @media (max-width:760px) { .edu-compact .edu-header { height:auto; min-height:60px; }.edu-compact .edu-main { padding-top:20px; }.edu-compact .edu-heading { flex-direction:row; align-items:center; flex-wrap:wrap; gap:12px; margin-bottom:18px; }.edu-compact .edu-heading h1 { font-size:22px; }.edu-compact .edu-heading-actions { gap:5px; }.edu-compact .edu-heading-actions button { padding:8px 10px; font-size:11px; }.edu-compact .edu-workspace { display:flex; flex-direction:column; gap:14px; }.edu-compact .edu-controls { display:block; }.edu-compact .edu-main-control .edu-input-unit { max-width:230px; }.edu-compact .edu-main-actions { max-width:280px; }.edu-compact .edu-mapping { justify-content:flex-start; margin-bottom:13px; }.edu-compact .edu-disclosure { padding:11px 0; }.edu-compact .edu-canvas-wrap.is-empty,.edu-compact .edu-empty { min-height:330px; }.edu-compact .edu-status { margin-top:0; font-size:10px; } }
+/* Channel views share source pixels, zoom and scroll position. */
+.edu-gallery-container { position:relative; background:#080d16; }
+.edu-channel-gallery { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:1px; background:#263336; }
+.edu-channel-panel { min-width:0; margin:0; background:#080d16; }
+.edu-channel-title { margin:0; height:37px; display:flex; justify-content:center; align-items:center; color:#b6c7c6; background:#111d25; font-size:12px; font-weight:550; letter-spacing:.5px; }
+.edu-channel-title.channel-0 { color:#899fe9; }.edu-channel-title.channel-1 { color:#e994a0; }
+.edu-channel-viewport { overflow:auto; background:#070b13; line-height:0; overscroll-behavior:contain; scrollbar-width:thin; scrollbar-color:#48625d #14231f; }
+.edu-channel-viewport.is-fit { overflow:hidden; }
+.edu-channel-viewport.is-zoomed { height:clamp(230px,35vw,520px); }
+.edu-channel-viewport canvas { display:block; max-width:none; image-rendering:auto; }
+.edu-channel-panel:last-child canvas { cursor:crosshair; }
+.edu-three .edu-main { max-width:1740px; }
+@media (max-width:1250px) {
+  .edu-three .edu-workspace { display:flex; flex-direction:column; gap:16px; }
+  .edu-three .edu-controls { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:0 20px; width:100%; padding:15px 18px; }
+  .edu-three .edu-primary-controls { grid-column:1 / -1; display:flex; align-items:center; gap:22px; padding-bottom:15px; }
+  .edu-three .edu-main-control { margin:0; flex:1; max-width:290px; }
+  .edu-three .edu-main-control .edu-input-unit { max-width:220px; }
+  .edu-three .edu-main-control input { font-size:20px; padding:7px 10px; margin-top:3px; }
+  .edu-three .edu-main-actions { margin:0 0 0 auto; min-width:185px; }
+  .edu-three .edu-primary-controls>.edu-check { margin:15px 0 0; white-space:nowrap; }
+  .edu-three .edu-mapping { display:none; }
+  .edu-three .edu-queue { display:flex; align-items:center; gap:20px; grid-column:1 / -1; padding-bottom:11px; margin-bottom:12px; }
+  .edu-three .edu-queue>select { flex:1; }
+  .edu-three .edu-queue-nav { gap:16px; margin:0; min-width:130px; }
+  .edu-three .edu-disclosure { min-width:0; padding:11px 0 0; }
+  .edu-three .edu-stage-column { width:100%; }
+  .edu-three .edu-channel-viewport.is-zoomed { height:clamp(230px,40vw,460px); }
+}
+@media (max-width:600px) {
+  .edu-three .edu-controls { padding:13px; gap:0 10px; }
+  .edu-three .edu-primary-controls { flex-wrap:wrap; gap:10px 15px; }
+  .edu-three .edu-main-control { min-width:155px; max-width:none; }
+  .edu-three .edu-primary-controls>.edu-check { margin-top:12px; }
+  .edu-three .edu-main-actions { margin:0; min-width:0; width:100%; max-width:none; }
+  .edu-three .edu-disclosure>summary { font-size:11px; }
+  .edu-three .edu-disclosure[open] { grid-column:1 / -1; order:2; }
+  .edu-three .edu-queue { flex-wrap:wrap; gap:8px; }
+  .edu-three .edu-queue-nav { min-width:110px; gap:8px; }
+  .edu-channel-title { height:31px; font-size:11px; }
+  .edu-three .edu-channel-viewport.is-zoomed { height:230px; }
+}
