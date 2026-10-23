@@ -32,3 +32,21 @@ test('batch reuses matching signatures and protects confirmed or manually edited
   assert.equal(batchRecordAction({ signature: 'old', reviewed: true, revisions: {} }, 'new'), 'protect');
   assert.equal(batchRecordAction({ signature: 'old', reviewed: false, revisions: { 1: 'positive' } }, 'new'), 'protect');
 });
+
+test('cleanup batch maps frozen settings per native channel without changing its snapshot', async () => {
+  const { cleanupWorkerRequest } = await import('../lib/edu-batch.ts');
+  const frozen = Object.freeze({ redFloor: 51, blueFloor: 25.5, redMinArea: 12, blueMinArea: 1, protectNuclear: true, onlyNuclear: false, nucleusThreshold: 51, nucleusMinArea: 45 });
+  const image = { channels: [{ ...channel('blue'), maxValue: 65535 }, channel('red')], width: 1, height: 1 };
+  const request = cleanupWorkerRequest(image, [0, 1], frozen);
+  assert.equal(request.blueFloor, 6553.5); assert.equal(request.redOptions.floor, 51); assert.equal(request.redOptions.nucleusThreshold, 13107);
+  assert.equal(request.nucleus, image.channels[0].data); assert.equal(request.edu, image.channels[1].data);
+  assert.equal(frozen.redFloor, 51);
+});
+test('cleanup manifest distinguishes successful, failed and unprocessed fields without old queue entries', async () => {
+  const { cleanupBatchSummary } = await import('../lib/edu-batch.ts');
+  const partial = cleanupBatchSummary(['a', 'b', 'c'], ['a'], [{ field: 'b', reason: 'bad TIFF' }], true);
+  assert.deepEqual([partial.requested, partial.completed, partial.failed, partial.stopped, partial.partial], [3, 1, 1, true, true]);
+  assert.deepEqual(partial.unprocessedFields, ['c']); assert.deepEqual(partial.completedFields, ['a']);
+  const complete = cleanupBatchSummary(['a'], ['a'], [], false);
+  assert.equal(complete.partial, false); assert.deepEqual(complete.unprocessedFields, []);
+});

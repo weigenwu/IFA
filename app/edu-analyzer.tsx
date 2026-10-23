@@ -5,7 +5,7 @@ import type { ChannelData, NumericArray } from '../lib/analysis';
 import { loadImages, type LoadedImage } from '../lib/image';
 import type { EduParameters, EduResult } from '../lib/edu';
 import { createStoredZip, safeFilePart, type ExportArchiveEntry } from '../lib/export-archive';
-import { resolveBatchChannels, nativeEduParameters, batchRecordAction } from '../lib/edu-batch';
+import { resolveBatchChannels, nativeEduParameters, batchRecordAction, cleanupWorkerRequest, cleanupBatchSummary, type CleanupParameters } from '../lib/edu-batch';
 import './edu.css';
 
 type Field = { id: string; name: string; group: string; files: File[] };
@@ -14,6 +14,9 @@ type Exclusion = { enabled: boolean; width: number; height: number };
 type DisplaySnapshot = { key: string; field: string; sourceHash: string; directory: string; synthetic: boolean; entries: ExportArchiveEntry[] };
 type BatchProgress = { running: boolean; completed: number; total: number; computed: number; reused: number; protected: number; failed: number; stopped: boolean; issues: Array<{ field: string; reason: string }> };
 type AnalysisSource = { image: LoadedImage; id: string; files: string[]; group: string; indices: [number, number]; parameters: EduParameters; exclusion: Exclusion; synthetic: boolean };
+type DisplaySource = Omit<AnalysisSource, 'parameters' | 'exclusion'> & { cleanup: CleanupParameters };
+type CleanedData = { nucleus: NumericArray; edu: NumericArray };
+type CleanupProgress = { running: boolean; total: number; attempted: number; completed: number; stopped: boolean; failures: Array<{ field: string; reason: string }> };
 type RecordResult = {
   field: string; group: string; sourceFiles: string[]; sourceHash: string; hashKind: string;
   width: number; height: number; displayOnly: boolean; synthetic: boolean; reviewed: boolean;
@@ -121,6 +124,9 @@ function analysisRecord(source: AnalysisSource, analysis: EduResult, revisions: 
   const { image, indices } = source;
   return { field: source.id, group: source.group, sourceFiles: source.files, sourceHash: image.hash, hashKind: image.sourceFiles.length > 1 ? 'SHA256 of newline-joined individual SHA256 hashes in input order' : 'SHA256 of original file', width: image.width, height: image.height, displayOnly: image.displayOnly, synthetic: source.synthetic, reviewed, channels: { nucleus: image.channels[indices[0]].label, edu: image.channels[indices[1]].label }, parameters: nativeEduParameters(image, indices, source.parameters), uiParameters: source.parameters, exclusion: source.exclusion, revisions, nuclei: analysis.nuclei, warnings: [...image.warnings, ...analysis.warnings], timestamp: new Date().toISOString(), signature: analysisSignature(source) };
 }
+function greenFor(image: LoadedImage, indices: [number, number]) {
+  return image.sourceFiles.length === 1 && image.channels[indices[0]]?.id === 'blue' && image.channels[indices[1]]?.id === 'red' ? image.channels.find(channel => channel.id === 'green') : undefined;
+}
 
 export default function EduAnalyzer() {
   const [fields, setFields] = useState<Field[]>([]), [index, setIndex] = useState(-1);
@@ -131,7 +137,7 @@ export default function EduAnalyzer() {
   const [blueSpeckle, setBlueSpeckle] = useState(1), [protectNuclear, setProtectNuclear] = useState(true), [onlyNuclear, setOnlyNuclear] = useState(false);
   const [displaySnapshots, setDisplaySnapshots] = useState<Record<string, DisplaySnapshot>>({});
   const [zipDownload, setZipDownload] = useState<{ url: string; name: string } | null>(null);
-  const [cleaned, setCleaned] = useState<{ nucleus: NumericArray; edu: NumericArray } | null>(null);
+  const [cleaned, setCleaned] = useState<CleanedData | null>(null);
   const [result, setResult] = useState<EduResult | null>(null), [revisions, setRevisions] = useState<Record<number, Revision>>({});
   const [records, setRecords] = useState<Record<string, RecordResult>>({});
   const [view, setView] = useState<'raw' | 'clean' | 'mask'>('raw'), [zoom, setZoom] = useState('fit');
@@ -141,6 +147,8 @@ export default function EduAnalyzer() {
   const [mappingConfirmed, setMappingConfirmed] = useState(false);
   const [batch, setBatch] = useState<BatchProgress | null>(null);
   const stopBatch = useRef(false);
+  const [cleanupBatch, setCleanupBatch] = useState<CleanupProgress | null>(null);
+  const stopCleanup = useRef(false);
   const canvases = useRef<Array<HTMLCanvasElement | null>>([]), folderInput = useRef<HTMLInputElement>(null), filesInput = useRef<HTMLInputElement>(null);
   const imagePanes = useRef<Array<HTMLDivElement | null>>([]);
   const expectedScroll = useRef(new WeakMap<HTMLDivElement, { left: number; top: number }>());
@@ -149,7 +157,7 @@ export default function EduAnalyzer() {
   const loadToken = useRef(0);
   const snapshotOrdinals = useRef(new Map<string, number>());
   const nucleus = image?.channels[nucleusIndex], edu = image?.channels[eduIndex];
-  const preservedGreen = image?.sourceFiles.length === 1 && nucleus?.id === 'blue' && edu?.id === 'red' ? image.channels.find(channel => channel.id === 'green') : undefined;
+  const preservedGreen = image ? greenFor(image, [nucleusIndex, eduIndex]) : undefined;
   const currentId = isDemo ? 'synthetic-demo' : fields[index]?.id;
   const displayKey = image && currentId ? `${image.hash}\n${currentId}` : null;
   const snapshotCount = Object.keys(displaySnapshots).length;
@@ -273,13 +281,14 @@ export default function EduAnalyzer() {
     if (!Number.isFinite(parameters.nucleusThreshold) || parameters.nucleusThreshold < 1 || parameters.nucleusThreshold > 254) { setError('用于核支持的核阈值需为 1–254。'); return; }
     setBusy('正在生成去杂点展示副本…'); setError(''); setZipDownload(null); await pause();
     try {
-      setCleaned(await compute<{ nucleus: NumericArray; edu: NumericArray }>({ operation: 'clean', nucleus: nucleus.data, edu: edu.data, width: image.width, height: image.height, blueFloor: blueFloor / 255 * nucleus.maxValue, blueSpeckle, redOptions: { floor: redFloor / 255 * edu.maxValue, minArea: speckle, nucleusThreshold: parameters.nucleusThreshold / 255 * nucleus.maxValue, nucleusMinArea: parameters.minArea, protectNuclear, onlyNuclear } })); setView('clean');
+      setCleaned(await compute<CleanedData>(cleanupWorkerRequest(image, [nucleusIndex, eduIndex], cleanupParameters()))); setView('clean');
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); } finally { setBusy(''); }
   }
   function makeRecord(analysis: EduResult, manual: Record<number, Revision>, reviewed: boolean): RecordResult | null {
     if (!image || !nucleus || !edu || !currentId) return null;
     return analysisRecord({ image, id: currentId, files: fields[index]?.files.map(file => file.webkitRelativePath || file.name) ?? image.sourceFiles, group, indices: [nucleusIndex, eduIndex], parameters, exclusion, synthetic: isDemo }, analysis, manual, reviewed);
-  }  function saveResult(next = false) {
+  }
+  function saveResult(next = false) {
     if (!result || !displayKey) return;
     const record = makeRecord(result, revisions, true);
     if (!record) return;
@@ -293,7 +302,8 @@ export default function EduAnalyzer() {
     setRevisions(updated); setSelected(id);
     const record = result ? makeRecord(result, updated, false) : null;
     if (record && displayKey) setRecords(old => ({ ...old, [displayKey]: record }));
-  }  function exportData(kind: 'summary' | 'cells' | 'json') {
+  }
+  function exportData(kind: 'summary' | 'cells' | 'json') {
     if (!saved.length) return;
     if (kind === 'json') { download(new Blob([JSON.stringify({ schema: 'fluoroscope-edu-v1', exportedAt: new Date().toISOString(), scope: 'All detected nuclei, including NK; no cell-type discrimination. RGB images exploratory. Fields are not biological replicates.', records: saved.map(record => ({ ...record, counts: counts(record.nuclei, record.revisions) })) }, null, 2)], { type: 'application/json' }), 'EdU_分析记录.json'); return; }
     const rows: unknown[][] = kind === 'summary' ? [['field', 'sample_or_group', 'total_nuclei', 'edu_positive', 'edu_negative', 'edu_positive_pct', 'manual_revisions', 'reviewed', 'display_only', 'synthetic', 'source_sha256', 'nucleus_channel', 'edu_channel', 'parameters_native', 'excluded_bottom_right', 'source_files', 'updated_at', 'batch_status']]
@@ -305,28 +315,39 @@ export default function EduAnalyzer() {
     }
     download(new Blob([csv(rows)], { type: 'text/csv;charset=utf-8' }), kind === 'summary' ? 'EdU_视野汇总.csv' : 'EdU_逐核数据.csv');
   }
-  function displaySettings() {
-    if (!image || !nucleus || !edu) throw new Error('请先选择图像。');
-    return { schema: 'fluoroscope-edu-display-v2', timestamp: new Date().toISOString(), field: currentId, group, purpose: 'Display derivative only, not for quantitative analysis', sourceFiles: fields[index]?.files.map(file => file.webkitRelativePath || file.name) ?? image.sourceFiles, sourceHash: image.hash, hashKind: image.sourceFiles.length > 1 ? 'SHA256 of newline-joined individual SHA256 hashes in input order' : 'SHA256 of original file', synthetic: isDemo, dimensions: [image.width, image.height], channels: { nucleus: nucleus.label, edu: edu.label }, display: { redFloor, blueFloor, redFloorNative: redFloor / 255 * edu.maxValue, blueFloorNative: blueFloor / 255 * nucleus.maxValue, thresholdUiScale: '0..255 normalized to channel full scale', redMinArea: speckle, blueMinArea: blueSpeckle, protectNuclear, onlyNuclear, nucleusSupportThreshold: parameters.nucleusThreshold, nucleusSupportThresholdNative: parameters.nucleusThreshold / 255 * nucleus.maxValue, nucleusSupportMinArea: parameters.minArea, nucleusFullScale: nucleus.maxValue, eduFullScale: edu.maxValue, exports: ['01_DAPI.png', '02_RED.png', '03_Merge.png'], greenPreservedInMerge: Boolean(preservedGreen), outputBitDepth: 8 }, warnings: image.warnings };
+  function cleanupParameters(): CleanupParameters {
+    return { redFloor, blueFloor, redMinArea: speckle, blueMinArea: blueSpeckle, protectNuclear, onlyNuclear, nucleusThreshold: parameters.nucleusThreshold, nucleusMinArea: parameters.minArea };
   }
-  async function captureDisplay(): Promise<DisplaySnapshot> {
-    if (!image || !cleaned || !nucleus || !edu || !displayKey || !currentId) throw new Error('请先生成去碎片预览。');
-    const settings = displaySettings();
-    let ordinal = snapshotOrdinals.current.get(displayKey);
-    if (!ordinal) { ordinal = snapshotOrdinals.current.size + 1; snapshotOrdinals.current.set(displayKey, ordinal); }
-    const directory = `${String(ordinal).padStart(4, '0')}_${isDemo ? 'DEMO_' : ''}${safeFilePart(currentId)}`;
-    const output = document.createElement('canvas'); output.width = image.width; output.height = image.height;
+  function currentDisplaySource(): DisplaySource | null {
+    if (!image || !nucleus || !edu || !currentId) return null;
+    return { image, id: currentId, group, files: fields[index]?.files.map(file => file.webkitRelativePath || file.name) ?? image.sourceFiles, indices: [nucleusIndex, eduIndex], synthetic: isDemo, cleanup: cleanupParameters() };
+  }
+  function displaySettings(source = currentDisplaySource()) {
+    if (!source) throw new Error('请先选择图像。');
+    const { image: input, indices, cleanup: settings } = source;
+    const blue = input.channels[indices[0]], red = input.channels[indices[1]];
+    return { schema: 'fluoroscope-edu-display-v2', timestamp: new Date().toISOString(), field: source.id, group: source.group, purpose: 'Display derivative only, not for quantitative analysis', sourceFiles: source.files, sourceHash: input.hash, hashKind: input.sourceFiles.length > 1 ? 'SHA256 of newline-joined individual SHA256 hashes in input order' : 'SHA256 of original file', synthetic: source.synthetic, dimensions: [input.width, input.height], channels: { nucleus: blue.label, edu: red.label }, display: { redFloor: settings.redFloor, blueFloor: settings.blueFloor, redFloorNative: settings.redFloor / 255 * red.maxValue, blueFloorNative: settings.blueFloor / 255 * blue.maxValue, thresholdUiScale: '0..255 normalized to channel full scale', redMinArea: settings.redMinArea, blueMinArea: settings.blueMinArea, protectNuclear: settings.protectNuclear, onlyNuclear: settings.onlyNuclear, nucleusSupportThreshold: settings.nucleusThreshold, nucleusSupportThresholdNative: settings.nucleusThreshold / 255 * blue.maxValue, nucleusSupportMinArea: settings.nucleusMinArea, nucleusFullScale: blue.maxValue, eduFullScale: red.maxValue, exports: ['01_DAPI.png', '02_RED.png', '03_Merge.png'], greenPreservedInMerge: Boolean(greenFor(input, indices)), outputBitDepth: 8 }, warnings: input.warnings };
+  }
+  async function captureDisplay(source = currentDisplaySource(), pixelsData = cleaned, progressPrefix = '正在保存'): Promise<DisplaySnapshot> {
+    if (!source || !pixelsData) throw new Error('请先生成去碎片预览。');
+    const { image: input, indices } = source;
+    const blue = input.channels[indices[0]], red = input.channels[indices[1]], green = greenFor(input, indices);
+    const key = `${input.hash}\n${source.id}`, settings = displaySettings(source);
+    let ordinal = snapshotOrdinals.current.get(key);
+    if (!ordinal) { ordinal = snapshotOrdinals.current.size + 1; snapshotOrdinals.current.set(key, ordinal); }
+    const directory = `${String(ordinal).padStart(4, '0')}_${source.synthetic ? 'DEMO_' : ''}${safeFilePart(source.id)}`;
+    const output = document.createElement('canvas'); output.width = input.width; output.height = input.height;
     const context = output.getContext('2d'); if (!context) throw new Error('浏览器无法生成导出图像。');
-    const pixels = context.createImageData(image.width, image.height);
+    const pixels = context.createImageData(input.width, input.height);
     const entries: ExportArchiveEntry[] = [];
     try {
       for (let panel = 0; panel < DISPLAY_CHANNELS.length; panel++) {
-        setBusy(`正在保存 ${DISPLAY_CHANNELS[panel]}…`); await pause();
-        for (let i = 0; i < cleaned.edu.length; i++) {
+        setBusy(`${progressPrefix} · ${DISPLAY_CHANNELS[panel]}…`); await pause();
+        for (let i = 0; i < pixelsData.edu.length; i++) {
           const at = i * 4;
-          pixels.data[at] = panel === 0 ? 0 : cleaned.edu[i] / edu.maxValue * 255;
-          pixels.data[at + 1] = panel === 2 && preservedGreen ? preservedGreen.data[i] / preservedGreen.maxValue * 255 : 0;
-          pixels.data[at + 2] = panel === 1 ? 0 : cleaned.nucleus[i] / nucleus.maxValue * 255;
+          pixels.data[at] = panel === 0 ? 0 : pixelsData.edu[i] / red.maxValue * 255;
+          pixels.data[at + 1] = panel === 2 && green ? green.data[i] / green.maxValue * 255 : 0;
+          pixels.data[at + 2] = panel === 1 ? 0 : pixelsData.nucleus[i] / blue.maxValue * 255;
           pixels.data[at + 3] = 255;
         }
         context.putImageData(pixels, 0, 0);
@@ -335,7 +356,51 @@ export default function EduAnalyzer() {
       }
     } finally { output.width = 0; output.height = 0; }
     entries.push({ name: `${directory}/settings.json`, data: new TextEncoder().encode(JSON.stringify(settings, null, 2)) });
-    return { key: displayKey, field: currentId, sourceHash: image.hash, directory, synthetic: isDemo, entries };
+    return { key, field: source.id, sourceHash: input.hash, directory, synthetic: source.synthetic, entries };
+  }
+  async function publishDisplayZip(snapshots: Record<string, DisplaySnapshot>, batchSummary?: ReturnType<typeof cleanupBatchSummary>, frozenParameters?: CleanupParameters) {
+    const items = Object.values(snapshots);
+    if (!items.length) throw new Error('没有成功处理的视野，未生成 ZIP。');
+    setBusy(`正在打包 ${items.length} 个视野…`); await pause();
+    const manifest = new TextEncoder().encode(JSON.stringify({ schema: 'fluoroscope-edu-batch-v2', exportedAt: new Date().toISOString(), fieldCount: items.length, purpose: 'Display derivatives only, not for quantitative analysis', ...(batchSummary ?? {}), ...(frozenParameters ? { frozenCleanupParameters: frozenParameters } : {}), fields: items.map(({ field, sourceHash, directory, synthetic }) => ({ field, sourceHash, directory, synthetic })) }, null, 2));
+    const archive = await createStoredZip([...items.flatMap(item => item.entries), { name: 'manifest.json', data: manifest }]);
+    const url = URL.createObjectURL(new Blob([archive], { type: 'application/zip' }));
+    const name = `EdU_${batchSummary ? '本批清理_' : ''}${items.length}视野${batchSummary?.partial ? '_部分完成' : ''}_DAPI_RED_Merge.zip`;
+    setZipDownload({ url, name });
+    const link = document.createElement('a'); link.href = url; link.download = name; link.click();
+  }
+  async function cleanAllAndExport() {
+    if (!fields.length || busy) return;
+    const frozen = cleanupParameters();
+    if (![frozen.redFloor, frozen.blueFloor, frozen.nucleusThreshold].every(value => Number.isFinite(value) && value >= 0 && value <= 255) || frozen.nucleusThreshold < 1 || ![frozen.redMinArea, frozen.blueMinArea, frozen.nucleusMinArea].every(value => Number.isInteger(value) && value >= 1)) { setError('请检查背景阈值和最小面积。'); return; }
+    const queue = [...fields];
+    const reference = { channels: image?.channels.map(channel => ({ id: channel.id, label: channel.label })) ?? [], nucleus: nucleusIndex, edu: eduIndex, confirmed: mappingConfirmed };
+    const fresh: Record<string, DisplaySnapshot> = {};
+    const progress: CleanupProgress = { running: true, total: queue.length, attempted: 0, completed: 0, stopped: false, failures: [] };
+    stopCleanup.current = false; setCleanupBatch({ ...progress }); setZipDownload(null); setError(''); setMessage('');
+    try {
+      for (let i = 0; i < queue.length; i++) {
+        if (stopCleanup.current) { progress.stopped = true; break; }
+        const field = queue[i];
+        setBusy(`正在清理 ${i + 1} / ${queue.length}…`); await pause();
+        try {
+          const loaded = await loadImages(field.files);
+          const indices = resolveBatchChannels(loaded, reference);
+          const source: DisplaySource = { image: loaded, id: field.id, group: field.id === currentId ? group : field.group, files: field.files.map(file => file.webkitRelativePath || file.name), indices, synthetic: false, cleanup: frozen };
+          const processed = await compute<CleanedData>(cleanupWorkerRequest(loaded, indices, frozen));
+          const snapshot = await captureDisplay(source, processed, `正在处理 ${i + 1} / ${queue.length}`);
+          fresh[snapshot.key] = snapshot; progress.completed++;
+          setDisplaySnapshots(old => ({ ...old, [snapshot.key]: snapshot }));
+          if (snapshot.key === displayKey && indices[0] === nucleusIndex && indices[1] === eduIndex) { setCleaned(processed); setView('clean'); }
+        } catch (cause) { progress.failures.push({ field: field.id, reason: cause instanceof Error ? cause.message : String(cause) }); }
+        progress.attempted++; setCleanupBatch({ ...progress, failures: [...progress.failures] });
+      }
+      progress.stopped ||= stopCleanup.current && progress.attempted < progress.total;
+      const summary = cleanupBatchSummary(queue.map(field => field.id), Object.values(fresh).map(snapshot => snapshot.field), progress.failures, progress.stopped);
+      await publishDisplayZip(fresh, summary, frozen);
+      setMessage(`${summary.partial ? '部分完成' : '处理完成'}：${summary.completed}/${summary.requested} 个视野，已导出本批 DAPI、RED、Merge。${summary.failed ? `失败 ${summary.failed} 个。` : ''}`);
+    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+    finally { progress.running = false; setCleanupBatch({ ...progress, failures: [...progress.failures] }); setBusy(''); }
   }
   async function saveDisplay() {
     setBusy('正在保存三张图…'); setError(''); setZipDownload(null);
@@ -358,17 +423,8 @@ export default function EduAnalyzer() {
         snapshots = { ...snapshots, [current.key]: current };
         setDisplaySnapshots(snapshots);
       }
-      const items = Object.values(snapshots);
-      if (!items.length) throw new Error('请先预览或保存至少一个视野。');
-      setBusy(`正在打包 ${items.length} 个视野…`); await pause();
-      const manifest = new TextEncoder().encode(JSON.stringify({ schema: 'fluoroscope-edu-batch-v1', exportedAt: new Date().toISOString(), fieldCount: items.length, purpose: 'Display derivatives only, not for quantitative analysis', fields: items.map(({ field, sourceHash, directory, synthetic }) => ({ field, sourceHash, directory, synthetic })) }, null, 2));
-      const archive = await createStoredZip([...items.flatMap(item => item.entries), { name: 'manifest.json', data: manifest }]);
-      const url = URL.createObjectURL(new Blob([archive], { type: 'application/zip' }));
-      const name = `EdU_${items.length}视野_DAPI_RED_Merge.zip`;
-      setZipDownload({ url, name });
-      const link = document.createElement('a'); link.href = url; link.download = name; link.click();
-      setMessage(`已打包 ${items.length} 个视野，每个含 DAPI、RED、Merge。`);
-    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
+      await publishDisplayZip(snapshots);
+      setMessage(`已打包 ${Object.keys(snapshots).length} 个视野，每个含 DAPI、RED、Merge。`);    } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
     finally { setBusy(''); }
   }
   function exportDisplaySettings() {
@@ -460,6 +516,7 @@ export default function EduAnalyzer() {
             <label className="edu-check"><input type="checkbox" disabled={!image} checked={protectNuclear} onChange={event => { setProtectNuclear(event.target.checked); invalidateDisplay(); }} />保护核内信号</label>
             <div className="edu-button-row edu-main-actions"><button disabled={!image} className="edu-primary" aria-label="生成去杂点预览" onClick={() => void clean()}>预览</button><button disabled={!cleaned} onClick={() => void saveDisplay()}>{!isDemo && index + 1 < fields.length ? '保存并下一张' : '保存此图'}</button><button disabled={!exportCount} onClick={() => void exportDisplays()}>全部导出{exportCount ? ` (${exportCount})` : ''}</button></div>
           </fieldset>
+          <div className="edu-clean-all"><button className="edu-primary" disabled={!fields.length || !!busy} onClick={() => void cleanAllAndExport()}>一键处理并导出</button>{cleanupBatch?.running && <div className="edu-batch-progress" role="status"><span>{cleanupBatch.attempted} / {cleanupBatch.total}</span><button onClick={() => { stopCleanup.current = true; setMessage('当前视野完成后停止，并导出已完成的图片。'); }}>停止</button></div>}</div>
           <div className="edu-display-queue"><span>已保存 {snapshotCount} 个视野</span>{zipDownload && <a href={zipDownload.url} download={zipDownload.name}>下载 ZIP</a>}</div>
           <details className="edu-disclosure" ref={channelDetails}><summary>通道设置</summary><fieldset disabled={!image || !!busy}>
             {image && <><label>细胞核通道<select value={nucleusIndex} onChange={event => changeChannel('nucleus', Number(event.target.value))}>{image.channels.map((channel, i) => <option key={channel.id} value={i}>{channel.label}</option>)}</select></label><label>EdU 通道<select value={eduIndex} onChange={event => changeChannel('edu', Number(event.target.value))}>{image.channels.map((channel, i) => <option key={channel.id} value={i}>{channel.label}</option>)}</select></label><p className="edu-help">请核对实际颜色，ch00 / ch01 顺序可能变化。</p>{<label className="edu-check edu-caution"><input type="checkbox" checked={acknowledged} onChange={event => setAcknowledged(event.target.checked)} /><span>确认：RGB / 伪彩图仅作探索性计数（整批适用）。</span></label>}</>}
@@ -498,6 +555,7 @@ export default function EduAnalyzer() {
           {result && <><div className="edu-stats"><article><span>总细胞核</span><strong>{totals?.total}</strong></article><article><span><i className="edu-dot yellow" /> EdU 阳性</span><strong>{totals?.positive}</strong></article><article className="edu-stat-primary"><span>阳性率</span><strong>{totals?.positivePct === null || !totals ? '—' : `${totals.positivePct.toFixed(1)}%`}</strong></article><article><span>人工修订</span><strong>{Object.keys(revisions).length}</strong></article></div><div className="edu-result-note"><span>● 阳性　<span className="edu-negative">● 阴性</span>　<span className="edu-excluded">● 排除</span></span><p>{result.warnings.join(' ')} 粘连核可能合并计数，请放大复核。</p></div></>}
           {selectedCell && <div className="edu-selection"><span>核 #{selectedCell.id} · {selectedCell.area} px² · EdU {Math.round(selectedCell.eduPositiveFraction * 100)}% · {revisions[selectedCell.id] ?? (selectedCell.positive ? '自动阳性' : '自动阴性')}</span><div>{(['positive', 'negative', 'exclude'] as const).map((state, i) => <button key={state} disabled={!!busy} onClick={() => revise(selectedCell.id, state)}>{['设为阳性', '设为阴性', '排除'][i]}</button>)}</div></div>}
           {(result || saved.length > 0) && <section className="edu-panel edu-export"><span className="edu-saved-count">已计算 {saved.length} 个视野</span><div className="edu-button-row"><button disabled={!result || !!busy} onClick={() => saveResult(false)}>{currentSaved?.reviewed ? '✓ 已确认' : '确认当前视野'}</button><button className="edu-primary" disabled={!result || !!busy || isDemo || index === fields.length - 1} onClick={() => saveResult(true)}>确认并下一个 →</button></div>{saved.length > 0 && <div className="edu-export-row"><button disabled={!!busy} onClick={() => exportData('summary')}>导出统计 CSV</button><button disabled={!!busy} onClick={() => exportData('cells')}>逐核 CSV</button><button disabled={!!busy} onClick={() => exportData('json')}>完整记录 JSON</button></div>}</section>}
+          {cleanupBatch && !cleanupBatch.running && <div className="edu-batch-report"><span>图片处理 {cleanupBatch.completed}/{cleanupBatch.total}{cleanupBatch.stopped ? ' · 已停止' : ''}{cleanupBatch.failures.length ? ` · 失败 ${cleanupBatch.failures.length}` : ''}</span>{cleanupBatch.failures.length > 0 && <details><summary>失败明细</summary><ul>{cleanupBatch.failures.map((issue, i) => <li key={i}><b>{issue.field}</b>：{issue.reason}</li>)}</ul></details>}</div>}
           {batch && !batch.running && <div className="edu-batch-report"><span>{batch.stopped ? '已停止' : '本批次'} {batch.completed}/{batch.total} · 新计算 {batch.computed} · 复用 {batch.reused} · 跳过 {batch.protected} · 失败 {batch.failed}</span>{batch.issues.length > 0 && <details><summary>查看明细</summary><ul>{batch.issues.map((issue, i) => <li key={i}><b>{issue.field}</b>：{issue.reason}</li>)}</ul></details>}</div>}
           <details className="edu-method"><summary>方法与注意事项</summary><div className="edu-method-grid"><div><h3>展示清理</h3><p>按背景阈值与 8 连通颗粒面积去碎片；可保护与核相交的红色。蓝色默认不变。核外信号未必是杂质，请切换原图核对。导出为 8-bit 展示 PNG，勿用该副本定量。</p></div><div><h3>EdU 计数</h3><p>核中值滤波 → 阈值分割 → 连通域与面积筛选 → 核内 EdU 阳性面积占比。EdU 测量使用原始输入，不受展示清理影响。不自动拆分粘连核，必要时在 Fiji 分水岭并人工复核。</p></div><div><h3>实验比较</h3><p>用阴性对照设阈值，曝光与 LUT 应一致。RGB / 伪彩图仅作探索性计数；同名合并图优先，不重复计数。视野不能代替生物学重复。计数含 NK；关闭页面前请导出结果。</p></div></div>{image && <details><summary>输入文件提示</summary><ul>{image.warnings.map((warning, i) => <li key={i}>{warning}</li>)}</ul></details>}</details>
         </div>

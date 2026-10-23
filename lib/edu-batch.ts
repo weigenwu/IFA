@@ -20,3 +20,13 @@ export function batchRecordAction(existing: { signature: string; reviewed: boole
   if (existing.signature === signature) return 'reuse';
   return existing.reviewed || Object.keys(existing.revisions).length > 0 ? 'protect' : 'compute';
 }
+
+export type CleanupParameters = { redFloor: number; blueFloor: number; redMinArea: number; blueMinArea: number; protectNuclear: boolean; onlyNuclear: boolean; nucleusThreshold: number; nucleusMinArea: number };
+export function cleanupWorkerRequest(image: Pick<LoadedImage, 'channels' | 'width' | 'height'>, indices: [number, number], parameters: CleanupParameters) {
+  const nucleus = image.channels[indices[0]], edu = image.channels[indices[1]];
+  return { operation: 'clean' as const, nucleus: nucleus.data, edu: edu.data, width: image.width, height: image.height, blueFloor: parameters.blueFloor / 255 * nucleus.maxValue, blueSpeckle: parameters.blueMinArea, redOptions: { floor: parameters.redFloor / 255 * edu.maxValue, minArea: parameters.redMinArea, nucleusThreshold: parameters.nucleusThreshold / 255 * nucleus.maxValue, nucleusMinArea: parameters.nucleusMinArea, protectNuclear: parameters.protectNuclear, onlyNuclear: parameters.onlyNuclear } };
+}
+export function cleanupBatchSummary(requestedFields: string[], completedFields: string[], failures: Array<{ field: string; reason: string }>, stopped: boolean) {
+  const finished = new Set([...completedFields, ...failures.map(failure => failure.field)]);
+  return { requested: requestedFields.length, completed: completedFields.length, failed: failures.length, stopped, partial: completedFields.length < requestedFields.length, requestedFields, completedFields, failures, unprocessedFields: requestedFields.filter(field => !finished.has(field)) };
+}

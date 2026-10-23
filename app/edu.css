@@ -189,3 +189,6 @@
 .edu-batch-progress button { font-size:11px; padding:5px 11px; }
 .edu-batch-report { font-size:11px; line-height:1.8; color:#698773; padding:10px 14px; background:#edf4ee; border:1px solid #dbe7dd; border-radius:8px; }
 .edu-batch-report details { margin-top:5px; }.edu-batch-report summary { cursor:pointer; }.edu-batch-report ul { margin:7px 0; padding-left:18px; }.edu-batch-report li { overflow-wrap:anywhere; }
+.edu-clean-all { padding:12px 0 0; }
+.edu-clean-all>button { width:100%; }
+@media (max-width:1250px) { .edu-three .edu-clean-all { grid-column:1 / -1; padding:0 0 12px; display:flex; align-items:center; gap:16px; }.edu-three .edu-clean-all>button { width:auto; min-width:180px; }.edu-three .edu-clean-all .edu-batch-progress { margin:0; gap:20px; } }
