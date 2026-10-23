@@ -184,3 +184,8 @@
 @media (min-width:1251px) { .edu-three .edu-main-actions button:last-child { flex-basis:100%; } }
 @media (max-width:1250px) { .edu-three .edu-display-queue { grid-column:1 / -1; margin:0 0 12px; }.edu-three .edu-main-actions { min-width:285px; }.edu-three .edu-primary-controls { gap:15px; } }
 @media (max-width:760px) { .edu-three .edu-primary-controls { flex-wrap:wrap; }.edu-three .edu-main-actions { min-width:0; width:100%; max-width:none; margin-left:0; }.edu-three .edu-main-control { max-width:none; }.edu-three .edu-primary-controls>.edu-check { margin-right:auto; } }
+.edu-batch-actions { border-top:1px solid #e2ebe4; margin-top:13px; padding-top:7px; }
+.edu-batch-progress { display:flex; align-items:center; justify-content:space-between; color:#57816c; font-size:11px; margin-top:10px; }
+.edu-batch-progress button { font-size:11px; padding:5px 11px; }
+.edu-batch-report { font-size:11px; line-height:1.8; color:#698773; padding:10px 14px; background:#edf4ee; border:1px solid #dbe7dd; border-radius:8px; }
+.edu-batch-report details { margin-top:5px; }.edu-batch-report summary { cursor:pointer; }.edu-batch-report ul { margin:7px 0; padding-left:18px; }.edu-batch-report li { overflow-wrap:anywhere; }
