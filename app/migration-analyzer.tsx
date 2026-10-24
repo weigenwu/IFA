@@ -335,10 +335,11 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
           if (frozen.enabled && !adjusted.estimate.valid) throw new Error(adjusted.warnings.join('；') || '无法可靠估计背景。');
           output.width = input.frame.width; output.height = input.frame.height; drawOverlay(context, adjusted.frame, frozenLineStyle, adjustedOnly ? undefined : item);
           const blob = await new Promise<Blob>((resolve, reject) => output.toBlob(value => value ? resolve(value) : reject(new Error('PNG 编码失败')), 'image/png'));
-          const directory = `${String(i + 1).padStart(4, '0')}_${safeFilePart(entry.path)}`;
-          files.push({ name: `${directory}/${adjustedOnly ? 'adjusted' : 'overlay'}.png`, data: new Uint8Array(await blob.arrayBuffer()) }, { name: `${directory}/display.json`, data: new TextEncoder().encode(JSON.stringify({ path: entry.path, sourceHash: input.hash, width: input.frame.width, height: input.frame.height, ...metadata }, null, 2)) });
-          if (!adjustedOnly) files.push({ name: `${directory}/analysis.json`, data: new TextEncoder().encode(JSON.stringify(item, null, 2)) });
-          image.status = 'completed'; image.directory = directory; completed++;
+          const stem = `${String(i + 1).padStart(4, '0')}_${safeFilePart(entry.file.name.replace(/\.[^.]+$/, ''))}`;
+          const imageFile = `${stem}_${adjustedOnly ? 'adjusted' : 'overlay'}.png`, displayFile = `_metadata/${stem}.display.json`, analysisFile = `_metadata/${stem}.analysis.json`;
+          files.push({ name: imageFile, data: new Uint8Array(await blob.arrayBuffer()) }, { name: displayFile, data: new TextEncoder().encode(JSON.stringify({ path: entry.path, sourceHash: input.hash, width: input.frame.width, height: input.frame.height, ...metadata }, null, 2)) });
+          if (!adjustedOnly) files.push({ name: analysisFile, data: new TextEncoder().encode(JSON.stringify(item, null, 2)) });
+          image.status = 'completed'; image.imageFile = imageFile; image.displayFile = displayFile; if (!adjustedOnly) image.analysisFile = analysisFile; completed++;
         } catch (cause) {
           const reason = cause instanceof Error ? cause.message : String(cause);
           image.error = reason; status.failed++; status.issues.push(`${entry.path}：${reason}`);
