@@ -12,10 +12,12 @@ type Mode = 'scratch' | 'transwell';
 type Parameters = ScratchParameters | TranswellParameters;
 type Entry = { key: string; path: string; file: File };
 type Point = { x: number; y: number };
+type LineStyle = { color: string; widthPx: number };
 type ResultRecord = MigrationCsvRow & { key: string; scratch?: ScratchResult; autoScratch?: ScratchResult; points?: Point[]; autoPoints?: Point[]; updatedAt: string; lastRunError?: string };
 type Loaded = { frame: RGBAFrame; hash: string; warnings: string[]; background: BackgroundEstimate };
 type Progress = { running: boolean; done: number; total: number; failed: number; skipped: number; stopped: boolean; issues: string[] };
 const SUPPORTED = /\.(png|jpe?g|tiff?|bmp|webp)$/i;
+const DEFAULT_LINE_STYLE: LineStyle = { color: '#e88d89', widthPx: 2 };
 const tick = () => new Promise<void>(resolve => setTimeout(resolve, 0));
 const numberText = (value: number | null | undefined, digits = 0) => value == null || !Number.isFinite(value) ? '—' : value.toLocaleString('en-US', { maximumFractionDigits: digits });
 
@@ -71,22 +73,22 @@ function anchorIndices(boundaries: ScratchBoundary[]) {
   const step = Math.max(1, Math.floor(boundaries.length / 12));
   return boundaries.map((_, index) => index).filter(index => index % step === 0 || index === boundaries.length - 1);
 }
-function drawOverlay(context: CanvasRenderingContext2D, frame: RGBAFrame, record?: ResultRecord, anchors = false) {
+function drawOverlay(context: CanvasRenderingContext2D, frame: RGBAFrame, lineStyle: LineStyle, record?: ResultRecord, anchors = false) {
   context.putImageData(new ImageData(new Uint8ClampedArray(frame.data), frame.width, frame.height), 0, 0);
   if (!record || record.error) return;
   const width = Math.max(2, frame.width / 600);
   if (record.scratch?.boundaries.length) {
     const edges = record.scratch.boundaries;
-    context.lineWidth = Math.max(2, frame.width / 600); context.strokeStyle = '#e88d89';
+    context.lineWidth = lineStyle.widthPx; context.strokeStyle = lineStyle.color;
     for (const side of ['left', 'right'] as const) { context.beginPath(); edges.forEach((edge, i) => i ? context.lineTo(edge[side], edge.y) : context.moveTo(edge[side], edge.y)); context.stroke(); }
-    if (anchors) for (const i of anchorIndices(edges)) for (const side of ['left', 'right'] as const) { context.beginPath(); context.arc(edges[i][side], edges[i].y, width * 3, 0, Math.PI * 2); context.fillStyle = '#fff'; context.fill(); context.strokeStyle = '#c26660'; context.stroke(); }
+    if (anchors) for (const i of anchorIndices(edges)) for (const side of ['left', 'right'] as const) { context.beginPath(); context.arc(edges[i][side], edges[i].y, width * 3, 0, Math.PI * 2); context.fillStyle = '#fff'; context.fill(); context.strokeStyle = lineStyle.color; context.stroke(); }
   } else if (record.points) {
     context.lineWidth = width; context.strokeStyle = '#11b9a6';
     for (const point of record.points) { context.beginPath(); context.arc(point.x, point.y, Math.max(4, frame.width / 220), 0, Math.PI * 2); context.stroke(); }
   }
 }
-function displayMetadata(settings: BackgroundSettings, result: ReturnType<typeof normalizeBackground>) {
-  return { settings, estimate: result.estimate, gains: result.gains, clippedFraction: result.clippedFraction, warnings: result.warnings, displayOnly: true, analysisUsesRawPixels: true };
+function displayMetadata(settings: BackgroundSettings, result: ReturnType<typeof normalizeBackground>, lineStyle?: LineStyle) {
+  return { settings, estimate: result.estimate, gains: result.gains, clippedFraction: result.clippedFraction, warnings: result.warnings, displayOnly: true, analysisUsesRawPixels: true, ...(lineStyle ? { lineStyle } : {}) };
 }
 
 export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
@@ -96,6 +98,7 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
   const [loaded, setLoaded] = useState<Loaded | null>(null), [records, setRecords] = useState<Record<string, ResultRecord>>({});
   const [parameters, setParameters] = useState<Parameters>(mode === 'scratch' ? DEFAULT_SCRATCH_PARAMETERS : DEFAULT_TRANSWELL_PARAMETERS);
   const [backgroundSettings, setBackgroundSettings] = useState<BackgroundSettings>(DEFAULT_BACKGROUND_SETTINGS);
+  const [lineStyle, setLineStyle] = useState<LineStyle>(DEFAULT_LINE_STYLE);
   const [busy, setBusy] = useState(''), [error, setError] = useState(''), [message, setMessage] = useState('');
   const [overlay, setOverlay] = useState(true), [editing, setEditing] = useState(false), [zoom, setZoom] = useState('fit');
   const [scratchDraft, setScratchDraft] = useState<ScratchBoundary[] | null>(null);
@@ -199,6 +202,9 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
   function updateBackground(change: Partial<BackgroundSettings>) {
     setBackgroundSettings(old => ({ ...old, ...change })); setDownloadLink(null);
   }
+  function updateLineStyle(change: Partial<LineStyle>) {
+    setLineStyle(old => ({ ...old, ...change })); setDownloadLink(null);
+  }
   function beginEditing() {
     if (!record || !loaded || stale) return;
     setOverlay(true); setEditing(!editing);
@@ -267,7 +273,8 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
   async function exportImages(adjustedOnly: boolean) {
     const targets = adjustedOnly ? [...entries] : entries.filter(entry => records[entry.key] && !records[entry.key].error);
     if (!targets.length || busy || (adjustedOnly && !backgroundSettings.enabled)) return;
-    const frozen = { ...backgroundSettings }, label = adjustedOnly ? '调整图' : '标记图';
+    const frozen = { ...backgroundSettings }, frozenLineStyle = { ...lineStyle }, label = adjustedOnly ? '调整图' : '标记图';
+    const exportedLineStyle = mode === 'scratch' && !adjustedOnly ? frozenLineStyle : undefined;
     const status: Progress = { running: true, done: 0, total: targets.length, failed: 0, skipped: 0, stopped: false, issues: [] };
     cancel.current = false; setProgress({ ...status }); setBusy(`正在生成${label}…`); setError(''); setMessage(''); setDownloadLink(null); setEditing(false); setScratchDraft(null);
     const files: ExportArchiveEntry[] = [], images: Array<{ path: string; status: string; [key: string]: unknown }> = [];
@@ -284,10 +291,10 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
           const input = entry.key === activeKey && loaded ? loaded : await readEntry(entry);
           image.sourceHash = input.hash; image.width = input.frame.width; image.height = input.frame.height; image.sourceWarnings = input.warnings;
           if (!adjustedOnly && input.hash !== item.sourceHash) throw new Error('源文件已改变，请重新分析。');
-          const adjusted = normalizeBackground(input.frame, frozen, input.background), metadata = displayMetadata(frozen, adjusted);
+          const adjusted = normalizeBackground(input.frame, frozen, input.background), metadata = displayMetadata(frozen, adjusted, exportedLineStyle);
           image.display = metadata;
           if (frozen.enabled && !adjusted.estimate.valid) throw new Error(adjusted.warnings.join('；') || '无法可靠估计背景。');
-          output.width = input.frame.width; output.height = input.frame.height; drawOverlay(context, adjusted.frame, adjustedOnly ? undefined : item);
+          output.width = input.frame.width; output.height = input.frame.height; drawOverlay(context, adjusted.frame, frozenLineStyle, adjustedOnly ? undefined : item);
           const blob = await new Promise<Blob>((resolve, reject) => output.toBlob(value => value ? resolve(value) : reject(new Error('PNG 编码失败')), 'image/png'));
           const directory = `${String(i + 1).padStart(4, '0')}_${safeFilePart(entry.path)}`;
           files.push({ name: `${directory}/${adjustedOnly ? 'adjusted' : 'overlay'}.png`, data: new Uint8Array(await blob.arrayBuffer()) }, { name: `${directory}/display.json`, data: new TextEncoder().encode(JSON.stringify({ path: entry.path, sourceHash: input.hash, width: input.frame.width, height: input.frame.height, ...metadata }, null, 2)) });
@@ -303,7 +310,7 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
       images.push(...targets.slice(status.done).map(entry => ({ path: entry.path, status: 'unprocessed' })));
       if (!completed) throw new Error(`没有成功导出的${label}。${status.issues[0] || (status.stopped ? '已停止。' : '')}`);
       if (!adjustedOnly) files.push({ name: 'results.csv', data: new TextEncoder().encode(makeMigrationCsv(mode, exportRows)) });
-      files.push({ name: 'manifest.json', data: new TextEncoder().encode(JSON.stringify({ mode, kind: adjustedOnly ? 'adjusted-images' : 'analysis-overlays', settings: frozen, displayOnly: true, analysisUsesRawPixels: true, requested: targets.length, completed, failed: status.failed, stopped: status.stopped, unprocessed: targets.length - status.done, images, issues: status.issues, exportedAt: new Date().toISOString() }, null, 2)) });
+      files.push({ name: 'manifest.json', data: new TextEncoder().encode(JSON.stringify({ mode, kind: adjustedOnly ? 'adjusted-images' : 'analysis-overlays', settings: frozen, ...(exportedLineStyle ? { lineStyle: exportedLineStyle } : {}), displayOnly: true, analysisUsesRawPixels: true, requested: targets.length, completed, failed: status.failed, stopped: status.stopped, unprocessed: targets.length - status.done, images, issues: status.issues, exportedAt: new Date().toISOString() }, null, 2)) });
       setBusy('正在打包 ZIP…'); await tick();
       const zip = await createStoredZip(files); presentDownload(new Blob([zip], { type: 'application/zip' }), `${mode}_${completed < targets.length ? '部分完成_' : ''}${label}.zip`);
       setMessage(`${label}已导出 ${completed}/${targets.length}${status.failed ? `；失败 ${status.failed} 张` : ''}${status.stopped ? '；已停止' : ''}。`);
@@ -315,8 +322,8 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
     if (!loaded || !canvas.current) return;
     canvas.current.width = loaded.frame.width; canvas.current.height = loaded.frame.height;
     const shown = scratchDraft && record ? { ...record, scratch: { ...record.scratch, boundaries: scratchDraft } as ScratchResult } : record;
-    const context = canvas.current.getContext('2d'); if (context) drawOverlay(context, display?.frame ?? loaded.frame, overlay ? shown : undefined, editing && mode === 'scratch');
-  }, [loaded, display, record, overlay, editing, mode, scratchDraft]);
+    const context = canvas.current.getContext('2d'); if (context) drawOverlay(context, display?.frame ?? loaded.frame, lineStyle, overlay ? shown : undefined, editing && mode === 'scratch');
+  }, [loaded, display, lineStyle, record, overlay, editing, mode, scratchDraft]);
 
   const controls: Array<{ key: string; label: string; min: number; max: number; step?: number }> = mode === 'scratch'
     ? [{ key: 'textureThreshold', label: '纹理阈值', min: 0.1, max: 128, step: 0.1 }, { key: 'centerXPct', label: '划痕中心 (%)', min: 1, max: 99 }, { key: 'roiTopPct', label: 'ROI 上缘 (%)', min: 0, max: 99.9, step: 0.1 }, { key: 'roiBottomPct', label: 'ROI 下缘 (%)', min: 0.1, max: 100, step: 0.1 }, { key: 'windowRadius', label: '纹理窗口半径', min: 1, max: 100 }, { key: 'minGapWidth', label: '最小划痕宽 (px)', min: 1, max: 10000 }, { key: 'rowStep', label: '边界采样间隔', min: 1, max: 100 }]
@@ -331,6 +338,10 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
         {entries.length > 0 && <><select aria-label="图像列表" disabled={!!busy} value={activeKey} onChange={event => { const entry = entries.find(item => item.key === event.target.value); if (entry) void openImage(entry); }}>{entries.map(entry => <option key={entry.key} value={entry.key}>{records[entry.key]?.error || records[entry.key]?.lastRunError ? '失败 · ' : records[entry.key]?.reviewed ? '✓ ' : records[entry.key] ? '已算 · ' : ''}{entry.path}</option>)}</select><div className="migration-prev-next"><button disabled={!!busy || currentIndex <= 0} onClick={() => void openImage(entries[currentIndex - 1])}>←</button><span>{currentIndex + 1} / {entries.length}</span><button disabled={!!busy || currentIndex === entries.length - 1} onClick={() => void openImage(entries[currentIndex + 1])}>→</button></div></>}
         <div className="migration-basic-controls">{controls.slice(0, 2).map(control)}</div><details><summary>更多参数</summary><div className="migration-parameter-grid">{controls.slice(2).map(control)}</div>{mode === 'transwell' && <label className="check"><input type="checkbox" checked={(parameters as TranswellParameters).excludeEdge} disabled={!!busy} onChange={event => { setParameters(old => ({ ...old, excludeEdge: event.target.checked })); setEditing(false); }} />排除触边对象</label>}</details>
         <details className="migration-background-settings"><summary>背景设置</summary><label>目标亮度<input type="number" min={160} max={250} defaultValue={backgroundSettings.target} disabled={!!busy} onBlur={event => { const value = Number(event.target.value); const target = event.target.value && Number.isFinite(value) ? Math.max(160, Math.min(250, value)) : backgroundSettings.target; event.target.value = String(target); updateBackground({ target }); }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }} /></label><label className="check"><input type="checkbox" checked={backgroundSettings.matchColor} disabled={!!busy} onChange={event => updateBackground({ matchColor: event.target.checked })} />同时统一色调</label><p>逐张估计背景，共用目标。仅调整显示与导出，分析仍用原图。</p></details>
+        {mode === 'scratch' && <details><summary>边界设置</summary>
+          <label>颜色<span className="migration-line-color"><input type="color" aria-label="边界颜色" value={lineStyle.color} disabled={!!busy} onChange={event => updateLineStyle({ color: event.target.value })} /><input key={lineStyle.color} type="text" aria-label="边界颜色 HEX" defaultValue={lineStyle.color} maxLength={7} spellCheck={false} disabled={!!busy} onBlur={event => { const color = /^#[0-9a-f]{6}$/i.test(event.target.value) ? event.target.value.toLowerCase() : lineStyle.color; event.target.value = color; updateLineStyle({ color }); }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }} /></span></label>
+          <label>粗细（原图 px）<input type="number" min={0.5} max={12} step={0.5} defaultValue={lineStyle.widthPx} disabled={!!busy} onBlur={event => { const value = Number(event.target.value); const widthPx = event.target.value && Number.isFinite(value) ? Math.round(Math.max(0.5, Math.min(12, value)) * 2) / 2 : lineStyle.widthPx; event.target.value = String(widthPx); updateLineStyle({ widthPx }); }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }} /></label>
+        </details>}
         <button className="wide" disabled={!loaded || !!busy} onClick={() => void analyzeCurrent()}>重算此图</button><button className="primary wide" disabled={!entries.length || !!busy} onClick={() => void analyzeAll()}>一键分析全部</button>
         {progress?.running && <div className="migration-progress"><span>{progress.done} / {progress.total}</span><button onClick={() => { cancel.current = true; setMessage('当前图完成后停止。'); }}>停止</button></div>}
         <p className="migration-qc-note">自动结果请核对</p>

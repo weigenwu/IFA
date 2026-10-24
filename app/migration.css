@@ -11,3 +11,7 @@
 .migration-background-settings p,.migration-warning p { margin:8px 0 2px; font-size:11px; line-height:1.8; color:#819681; }
 .migration-downloads .background-export { flex-basis:100%; }
 .migration-toolbar label.check { white-space:nowrap; }
+.migration-line-color { display:flex; gap:7px; margin-top:5px; }
+.migration-line-color input { min-width:0; height:34px; border:1px solid #d7e3da; border-radius:6px; background:#fbfdfb; }
+.migration-line-color input[type=color] { width:42px; padding:3px; flex-shrink:0; cursor:pointer; }
+.migration-line-color input[type=text] { width:100%; padding:7px; color:#3b6451; font-size:12px; }
