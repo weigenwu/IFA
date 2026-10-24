@@ -15,3 +15,6 @@
 .migration-line-color input { min-width:0; height:34px; border:1px solid #d7e3da; border-radius:6px; background:#fbfdfb; }
 .migration-line-color input[type=color] { width:42px; padding:3px; flex-shrink:0; cursor:pointer; }
 .migration-line-color input[type=text] { width:100%; padding:7px; color:#3b6451; font-size:12px; }
+.migration-scratch-tools { width:100%; margin-top:9px; }
+.migration-edit-modes { display:flex; gap:6px; }
+.migration-edit-modes button { flex:1; padding:7px 5px; font-size:11px; }

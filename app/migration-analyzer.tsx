@@ -6,6 +6,7 @@ import { createStoredZip, safeFilePart, type ExportArchiveEntry } from '../lib/e
 import { DEFAULT_SCRATCH_PARAMETERS, DEFAULT_TRANSWELL_PARAMETERS, SCRATCH_ALGORITHM_VERSION, measureScratch, type RGBAFrame, type ScratchParameters, type ScratchResult, type ScratchBoundary, type TranswellParameters, type TranswellResult } from '../lib/migration';
 import { makeMigrationCsv, scratchClosure, parseScratchFile, type MigrationCsvRow } from '../lib/migration-batch';
 import { DEFAULT_BACKGROUND_SETTINGS, estimateBackground, normalizeBackground, type BackgroundEstimate, type BackgroundSettings } from '../lib/brightfield-display';
+import { moveScratchBoundary, traceScratchSegment, type ScratchSide, type TracePoint } from '../lib/scratch-edit';
 import './migration.css';
 
 type Mode = 'scratch' | 'transwell';
@@ -16,6 +17,7 @@ type LineStyle = { color: string; widthPx: number };
 type ResultRecord = MigrationCsvRow & { key: string; scratch?: ScratchResult; autoScratch?: ScratchResult; points?: Point[]; autoPoints?: Point[]; updatedAt: string; lastRunError?: string };
 type Loaded = { frame: RGBAFrame; hash: string; warnings: string[]; background: BackgroundEstimate };
 type Progress = { running: boolean; done: number; total: number; failed: number; skipped: number; stopped: boolean; issues: string[] };
+type ScratchStroke = { key: string; hash: string; paramsJson: string; pointerId: number; side: ScratchSide; mode: 'trace' | 'move'; radiusPx: number; start: TracePoint; centerY: number; last: TracePoint; base: ScratchBoundary[]; boundaries: ScratchBoundary[]; before: ResultRecord; beforeDraft: ScratchBoundary[] | null; moved: boolean };
 const SUPPORTED = /\.(png|jpe?g|tiff?|bmp|webp)$/i;
 const DEFAULT_LINE_STYLE: LineStyle = { color: '#e88d89', widthPx: 2 };
 const tick = () => new Promise<void>(resolve => setTimeout(resolve, 0));
@@ -73,6 +75,12 @@ function anchorIndices(boundaries: ScratchBoundary[]) {
   const step = Math.max(1, Math.floor(boundaries.length / 12));
   return boundaries.map((_, index) => index).filter(index => index % step === 0 || index === boundaries.length - 1);
 }
+function initialScratchDraft(record: ResultRecord, frame: RGBAFrame) {
+  const original = JSON.parse(record.paramsJson) as ScratchParameters;
+  const top = Math.floor(frame.height * original.roiTopPct / 100), bottom = Math.ceil(frame.height * original.roiBottomPct / 100);
+  const steps = Math.max(1, Math.ceil((bottom - top) / Math.min(2, original.rowStep)));
+  return Array.from({ length: steps + 1 }, (_, i) => ({ y: top + (bottom - top) * i / steps, left: frame.width * 0.4, right: frame.width * 0.6 }));
+}
 function drawOverlay(context: CanvasRenderingContext2D, frame: RGBAFrame, lineStyle: LineStyle, record?: ResultRecord, anchors = false) {
   context.putImageData(new ImageData(new Uint8ClampedArray(frame.data), frame.width, frame.height), 0, 0);
   if (!record || record.error) return;
@@ -102,10 +110,12 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
   const [busy, setBusy] = useState(''), [error, setError] = useState(''), [message, setMessage] = useState('');
   const [overlay, setOverlay] = useState(true), [editing, setEditing] = useState(false), [zoom, setZoom] = useState('fit');
   const [scratchDraft, setScratchDraft] = useState<ScratchBoundary[] | null>(null);
+  const [editMode, setEditMode] = useState<'trace' | 'move'>('trace'), [editRadius, setEditRadius] = useState(32);
+  const [undoStack, setUndoStack] = useState<ResultRecord[]>([]);
   const [progress, setProgress] = useState<Progress | null>(null), [downloadLink, setDownloadLink] = useState<{ url: string; name: string } | null>(null);
   const canvas = useRef<HTMLCanvasElement>(null), fileInput = useRef<HTMLInputElement>(null), folderInput = useRef<HTMLInputElement>(null);
   const cancel = useRef(false), loadVersion = useRef(0);
-  const dragging = useRef<{ side: 'left' | 'right'; index: number; boundaries: ScratchBoundary[] } | null>(null);
+  const stroke = useRef<ScratchStroke | null>(null);
   const paramsJson = JSON.stringify(parameters), active = entries.find(entry => entry.key === activeKey), record = records[activeKey];
   const currentIndex = entries.findIndex(entry => entry.key === activeKey), stale = Boolean(record && (record.paramsJson !== paramsJson || record.algorithmVersion !== currentVersion));
   const exportRows: MigrationCsvRow[] = entries.map(entry => {
@@ -128,7 +138,7 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
   }
   async function openImage(entry: Entry) {
     const version = ++loadVersion.current;
-    setActiveKey(entry.key); setLoaded(null); setEditing(false); setScratchDraft(null); setError(''); setBusy('正在读取…');
+    endEditing(true); setActiveKey(entry.key); setLoaded(null); setError(''); setBusy('正在读取…');
     let source: Loaded | undefined;
     try {
       source = await readEntry(entry); if (version !== loadVersion.current) return;
@@ -161,7 +171,7 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
   }
   async function analyzeCurrent() {
     if (!active || !loaded || busy) return;
-    setBusy('正在分析…'); setEditing(false); setScratchDraft(null); setError(''); await tick();
+    endEditing(true); setBusy('正在分析…'); setError(''); await tick();
     try { const result = await processFrame(mode, loaded.frame, parameters); setRecords(old => ({ ...old, [active.key]: makeRecord(active, loaded, parameters, result, mode) })); }
     catch (cause) { setError(fail(active, parameters, cause, loaded)); }
     finally { setBusy(''); }
@@ -170,7 +180,7 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
     if (!entries.length || busy) return;
     const frozen = { ...parameters }, signature = JSON.stringify(frozen), queue = [...entries];
     const status: Progress = { running: true, done: 0, total: queue.length, failed: 0, skipped: 0, stopped: false, issues: [] };
-    cancel.current = false; setProgress({ ...status }); setEditing(false); setScratchDraft(null); setError(''); setMessage('');
+    cancel.current = false; endEditing(true); setProgress({ ...status }); setError(''); setMessage('');
     try {
       for (let i = 0; i < queue.length; i++) {
         if (cancel.current) { status.stopped = true; break; }
@@ -205,64 +215,93 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
   function updateLineStyle(change: Partial<LineStyle>) {
     setLineStyle(old => ({ ...old, ...change })); setDownloadLink(null);
   }
+  function cancelScratchStroke(clearDraft = false) {
+    const pending = stroke.current; stroke.current = null;
+    if (clearDraft) setScratchDraft(null); else if (pending) setScratchDraft(pending.beforeDraft);
+    if (pending && canvas.current?.hasPointerCapture(pending.pointerId)) canvas.current.releasePointerCapture(pending.pointerId);
+  }
+  function endEditing(clearHistory = false) {
+    cancelScratchStroke(true); setEditing(false);
+    if (clearHistory) setUndoStack([]);
+  }
   function beginEditing() {
     if (!record || !loaded || stale) return;
-    setOverlay(true); setEditing(!editing);
-    if (editing) { setScratchDraft(null); return; }
-    if (mode === 'scratch' && !record.scratch?.boundaries.length) {
-      const original = JSON.parse(record.paramsJson) as ScratchParameters;
-      const top = Math.floor(loaded.frame.height * original.roiTopPct / 100), bottom = Math.ceil(loaded.frame.height * original.roiBottomPct / 100);
-      const boundaries = Array.from({ length: 13 }, (_, i) => ({ y: top + (bottom - top) * i / 12, left: loaded.frame.width * 0.4, right: loaded.frame.width * 0.6 }));
-      setScratchDraft(boundaries);
-    }
+    if (editing) { endEditing(); return; }
+    setOverlay(true); setEditing(true);
+    if (mode === 'scratch' && !record.scratch?.boundaries.length) setScratchDraft(initialScratchDraft(record, loaded.frame));
   }
-  function editBoundaries(boundaries: ScratchBoundary[]) {
-    if (!loaded || !record) return;
-    const measured = measureScratch(boundaries, loaded.frame.width, loaded.frame.height);
-    const scratch = { ...record.scratch, ...measured, boundaries } as ScratchResult;
-    setScratchDraft(null);
-    updateRecord({ scratch, areaPx: measured.areaPx, meanWidthPx: measured.meanWidthPx, warnings: [...loaded.warnings, ...measured.qc], manualEdited: true, reviewed: false, pairConfirmed: false });
-  }
-  function pointerPosition(event: React.PointerEvent<HTMLCanvasElement>) {
-    const rect = event.currentTarget.getBoundingClientRect(), frame = loaded!.frame;
+  function pointerPosition(event: { clientX: number; clientY: number }, surface: HTMLCanvasElement) {
+    const rect = surface.getBoundingClientRect(), frame = loaded!.frame;
     return { x: Math.max(0, Math.min(frame.width, (event.clientX - rect.left) / rect.width * frame.width)), y: Math.max(0, Math.min(frame.height, (event.clientY - rect.top) / rect.height * frame.height)), tolerance: 14 * frame.width / rect.width };
   }
   function pointerDown(event: React.PointerEvent<HTMLCanvasElement>) {
-    if (!editing || !loaded || !record || busy || stale) return;
-    const point = pointerPosition(event);
+    if (!editing || !loaded || !record || busy || stale || stroke.current || event.button !== 0) return;
+    const point = pointerPosition(event, event.currentTarget);
     if (mode === 'transwell') {
       const points = [...(record.points ?? [])]; let nearest = -1, distance = point.tolerance;
       points.forEach((candidate, i) => { const d = Math.hypot(candidate.x - point.x, candidate.y - point.y); if (d < distance) { nearest = i; distance = d; } });
       if (nearest >= 0) points.splice(nearest, 1); else points.push({ x: point.x, y: point.y });
       updateRecord({ points, correctedCount: points.length, manualEdited: true, reviewed: false }); return;
     }
-    const boundaries = scratchDraft ?? record.scratch?.boundaries ?? []; let closest: { side: 'left' | 'right'; index: number; distance: number } | null = null;
-    for (let index = 0; index < boundaries.length; index++) for (const side of ['left', 'right'] as const) {
-      const distance = Math.hypot(boundaries[index][side] - point.x, boundaries[index].y - point.y);
-      if (distance < point.tolerance && (!closest || distance < closest.distance)) closest = { side, index, distance };
+    const boundaries = scratchDraft ?? record.scratch?.boundaries ?? [];
+    let closest: { side: ScratchSide; point: TracePoint; distance: number } | null = null;
+    for (let i = 1; i < boundaries.length; i++) for (const side of ['left', 'right'] as const) {
+      const a = boundaries[i - 1], b = boundaries[i], dx = b[side] - a[side], dy = b.y - a.y;
+      const t = Math.max(0, Math.min(1, ((point.x - a[side]) * dx + (point.y - a.y) * dy) / (dx * dx + dy * dy || 1)));
+      const hit = { x: a[side] + dx * t, y: a.y + dy * t }, distance = Math.hypot(hit.x - point.x, hit.y - point.y);
+      if (distance < point.tolerance && (!closest || distance < closest.distance)) closest = { side, point: hit, distance };
     }
-    if (closest) { dragging.current = { side: closest.side, index: closest.index, boundaries: boundaries.map(edge => ({ ...edge })) }; event.currentTarget.setPointerCapture(event.pointerId); }
+    if (!closest) return;
+    point.y = Math.max(boundaries[0].y, Math.min(boundaries[boundaries.length - 1].y, point.y));
+    stroke.current = { key: activeKey, hash: loaded.hash, paramsJson, pointerId: event.pointerId, side: closest.side, mode: editMode, radiusPx: editRadius, start: point, centerY: closest.point.y, last: closest.point, base: boundaries, boundaries, before: record, beforeDraft: scratchDraft, moved: false };
+    event.currentTarget.setPointerCapture(event.pointerId); event.preventDefault();
   }
   function pointerMove(event: React.PointerEvent<HTMLCanvasElement>) {
-    const drag = dragging.current;
-    if (!drag || !loaded || busy) return;
-    const point = pointerPosition(event), center = drag.boundaries[drag.index];
-    if (Math.abs(point.x - center[drag.side]) < 1) return;
-    const reach = Math.max(1, (drag.boundaries[drag.boundaries.length - 1].y - drag.boundaries[0].y) / 12);
-    const lower = [...drag.boundaries].reverse().find(edge => edge.y <= center.y - reach) ?? drag.boundaries[0];
-    const upper = drag.boundaries.find(edge => edge.y >= center.y + reach) ?? drag.boundaries[drag.boundaries.length - 1];
-    const boundaries = drag.boundaries.map(edge => {
-      if (edge.y < lower.y || edge.y > upper.y) return { ...edge };
-      const adjusted = edge.y <= center.y
-        ? lower[drag.side] + (point.x - lower[drag.side]) * (center.y === lower.y ? 1 : (edge.y - lower.y) / (center.y - lower.y))
-        : point.x + (upper[drag.side] - point.x) * (upper.y === center.y ? 1 : (edge.y - center.y) / (upper.y - center.y));
-      return { ...edge, [drag.side]: Math.max(drag.side === 'left' ? 0 : edge.left, Math.min(drag.side === 'left' ? edge.right : loaded.frame.width, adjusted)) };
-    });
-    editBoundaries(boundaries);
+    const pending = stroke.current;
+    if (!pending || pending.pointerId !== event.pointerId || !loaded) return;
+    if (!editing || busy || stale || pending.key !== activeKey || pending.hash !== loaded.hash || pending.paramsJson !== paramsJson) { cancelScratchStroke(true); return; }
+    const coalesced = event.nativeEvent.getCoalescedEvents?.() ?? [];
+    for (const sample of [...coalesced, event.nativeEvent]) {
+      const point = pointerPosition(sample, event.currentTarget);
+      point.y = Math.max(pending.base[0].y, Math.min(pending.base[pending.base.length - 1].y, point.y));
+      if (!pending.moved && Math.hypot(point.x - pending.start.x, point.y - pending.start.y) < 0.5) continue;
+      pending.moved = true;
+      pending.boundaries = pending.mode === 'move'
+        ? moveScratchBoundary(pending.base, pending.side, pending.centerY, point.x - pending.start.x, pending.radiusPx, loaded.frame.width)
+        : traceScratchSegment(pending.boundaries, pending.side, pending.last, point, loaded.frame.width);
+      pending.last = point;
+    }
+    if (pending.moved) setScratchDraft(pending.boundaries);
+  }
+  function pointerUp(event: React.PointerEvent<HTMLCanvasElement>) {
+    if (stroke.current?.pointerId !== event.pointerId) return;
+    pointerMove(event);
+    const pending = stroke.current;
+    cancelScratchStroke();
+    if (!pending?.moved || !loaded || busy || stale || pending.key !== activeKey || pending.hash !== loaded.hash || pending.paramsJson !== paramsJson) return;
+    const changed = pending.boundaries.length !== pending.base.length || pending.boundaries.some((edge, i) => edge.y !== pending.base[i].y || edge.left !== pending.base[i].left || edge.right !== pending.base[i].right);
+    if (!changed) return;
+    const measured = measureScratch(pending.boundaries, loaded.frame.width, loaded.frame.height);
+    const next: ResultRecord = { ...pending.before, scratch: { ...measured, boundaries: pending.boundaries }, areaPx: measured.areaPx, meanWidthPx: measured.meanWidthPx, warnings: [...new Set([...pending.before.warnings, ...loaded.warnings, ...measured.qc])], manualEdited: true, reviewed: false, pairConfirmed: false, updatedAt: new Date().toISOString() };
+    setUndoStack(old => [...old.slice(-19), pending.before]);
+    setRecords(old => ({ ...old, [pending.key]: next })); setScratchDraft(null); setDownloadLink(null);
+  }
+  function undoScratch() {
+    if (!undoStack.length || !loaded || busy || stale) return;
+    cancelScratchStroke(true);
+    const previous = undoStack[undoStack.length - 1];
+    if (previous.key !== activeKey || previous.sourceHash !== loaded.hash || previous.paramsJson !== paramsJson) return;
+    setRecords(old => ({ ...old, [activeKey]: previous })); setUndoStack(old => old.slice(0, -1)); setDownloadLink(null);
+    if (editing && !previous.scratch?.boundaries.length) setScratchDraft(initialScratchDraft(previous, loaded.frame));
   }
   function resetManual() {
     if (!record) return;
-    if (mode === 'scratch' && record.autoScratch) updateRecord({ scratch: record.autoScratch, areaPx: record.autoScratch.areaPx, meanWidthPx: record.autoScratch.meanWidthPx, warnings: record.autoScratch.qc, manualEdited: false, reviewed: false, pairConfirmed: false });
+    cancelScratchStroke(true);
+    if (mode === 'scratch' && record.autoScratch) {
+      setUndoStack(old => [...old.slice(-19), record]);
+      updateRecord({ scratch: record.autoScratch, areaPx: record.autoScratch.areaPx, meanWidthPx: record.autoScratch.meanWidthPx, warnings: [...(loaded?.warnings ?? []), ...record.autoScratch.qc], manualEdited: false, reviewed: false, pairConfirmed: false });
+      if (editing && !record.autoScratch.boundaries.length && loaded) setScratchDraft(initialScratchDraft(record, loaded.frame));
+    }
     if (mode === 'transwell') updateRecord({ points: record.autoPoints, correctedCount: record.autoCount, manualEdited: false, reviewed: false });
   }
   function presentDownload(blob: Blob, name: string) {
@@ -276,7 +315,7 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
     const frozen = { ...backgroundSettings }, frozenLineStyle = { ...lineStyle }, label = adjustedOnly ? '调整图' : '标记图';
     const exportedLineStyle = mode === 'scratch' && !adjustedOnly ? frozenLineStyle : undefined;
     const status: Progress = { running: true, done: 0, total: targets.length, failed: 0, skipped: 0, stopped: false, issues: [] };
-    cancel.current = false; setProgress({ ...status }); setBusy(`正在生成${label}…`); setError(''); setMessage(''); setDownloadLink(null); setEditing(false); setScratchDraft(null);
+    cancel.current = false; endEditing(); setProgress({ ...status }); setBusy(`正在生成${label}…`); setError(''); setMessage(''); setDownloadLink(null);
     const files: ExportArchiveEntry[] = [], images: Array<{ path: string; status: string; [key: string]: unknown }> = [];
     const output = document.createElement('canvas'), context = output.getContext('2d');
     let completed = 0;
@@ -322,21 +361,21 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
     if (!loaded || !canvas.current) return;
     canvas.current.width = loaded.frame.width; canvas.current.height = loaded.frame.height;
     const shown = scratchDraft && record ? { ...record, scratch: { ...record.scratch, boundaries: scratchDraft } as ScratchResult } : record;
-    const context = canvas.current.getContext('2d'); if (context) drawOverlay(context, display?.frame ?? loaded.frame, lineStyle, overlay ? shown : undefined, editing && mode === 'scratch');
-  }, [loaded, display, lineStyle, record, overlay, editing, mode, scratchDraft]);
+    const context = canvas.current.getContext('2d'); if (context) drawOverlay(context, display?.frame ?? loaded.frame, lineStyle, overlay ? shown : undefined, editing && mode === 'scratch' && editMode === 'move');
+  }, [loaded, display, lineStyle, record, overlay, editing, mode, editMode, scratchDraft]);
 
   const controls: Array<{ key: string; label: string; min: number; max: number; step?: number }> = mode === 'scratch'
     ? [{ key: 'textureThreshold', label: '纹理阈值', min: 0.1, max: 128, step: 0.1 }, { key: 'centerXPct', label: '划痕中心 (%)', min: 1, max: 99 }, { key: 'roiTopPct', label: 'ROI 上缘 (%)', min: 0, max: 99.9, step: 0.1 }, { key: 'roiBottomPct', label: 'ROI 下缘 (%)', min: 0.1, max: 100, step: 0.1 }, { key: 'windowRadius', label: '纹理窗口半径', min: 1, max: 100 }, { key: 'minGapWidth', label: '最小划痕宽 (px)', min: 1, max: 10000 }, { key: 'rowStep', label: '边界采样间隔', min: 1, max: 100 }]
     : [{ key: 'stainThreshold', label: '染色阈值', min: 1, max: 255 }, { key: 'minArea', label: '最小面积 (px²)', min: 1, max: 100000 }, { key: 'peakDistance', label: '细胞中心间距 (px)', min: 1, max: 1000 }, { key: 'maxBrightness', label: '最大亮度', min: 1, max: 255 }, { key: 'minPeakRadius', label: '最小中心半径', min: 1, max: 100 }, { key: 'clusterArea', label: '大团块面积 (px²)', min: 1, max: 1000000 }];
-  const control = (item: typeof controls[number]) => <label key={item.key}>{item.label}<input type="number" min={item.min} max={item.max} step={item.step ?? 1} value={Number((parameters as unknown as Record<string, unknown>)[item.key])} disabled={!!busy} onChange={event => { setParameters(old => ({ ...old, [item.key]: +event.target.value })); setEditing(false); setScratchDraft(null); setDownloadLink(null); }} /></label>;
+  const control = (item: typeof controls[number]) => <label key={item.key}>{item.label}<input type="number" min={item.min} max={item.max} step={item.step ?? 1} value={Number((parameters as unknown as Record<string, unknown>)[item.key])} disabled={!!busy} onChange={event => { endEditing(true); setParameters(old => ({ ...old, [item.key]: +event.target.value })); setDownloadLink(null); }} /></label>;
   return <div className="migration-app">
     <header className="migration-header"><a className="migration-brand" href="../"><span>✳</span> FluoroScope</a><nav><a href="../intensity/">荧光</a><a href="../edu/">EdU</a><a href="../scratch/" aria-current={mode === 'scratch' ? 'page' : undefined}>划痕</a><a href="../transwell/" aria-current={mode === 'transwell' ? 'page' : undefined}>Transwell</a></nav><small>本地处理</small></header>
-    <main className="migration-main"><div className="migration-heading"><h1>{title}</h1><div><button className="quiet" disabled={!entries.length || !!busy} onClick={() => { ++loadVersion.current; setEntries([]); setRecords({}); setLoaded(null); setActiveKey(''); setEditing(false); setScratchDraft(null); setProgress(null); setError(''); setMessage(''); setDownloadLink(null); }}>清空列表</button><button disabled={!!busy} onClick={() => fileInput.current?.click()}>选择图像</button><button className="primary" disabled={!!busy} onClick={() => folderInput.current?.click()}>导入文件夹</button></div></div>
+    <main className="migration-main"><div className="migration-heading"><h1>{title}</h1><div><button className="quiet" disabled={!entries.length || !!busy} onClick={() => { ++loadVersion.current; endEditing(true); setEntries([]); setRecords({}); setLoaded(null); setActiveKey(''); setProgress(null); setError(''); setMessage(''); setDownloadLink(null); }}>清空列表</button><button disabled={!!busy} onClick={() => fileInput.current?.click()}>选择图像</button><button className="primary" disabled={!!busy} onClick={() => folderInput.current?.click()}>导入文件夹</button></div></div>
       <input hidden ref={fileInput} type="file" multiple accept=".png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp" onChange={event => { void importFiles(event.target.files); event.target.value = ''; }} /><input hidden ref={folderInput} type="file" multiple {...({ webkitdirectory: '' } as Record<string, string>)} onChange={event => { void importFiles(event.target.files); event.target.value = ''; }} />
       {error && <div className="migration-error" role="alert">{error}</div>}{message && <div className="migration-message" role="status">{message}</div>}
       <div className="migration-workspace"><aside className="migration-controls">
         {entries.length > 0 && <><select aria-label="图像列表" disabled={!!busy} value={activeKey} onChange={event => { const entry = entries.find(item => item.key === event.target.value); if (entry) void openImage(entry); }}>{entries.map(entry => <option key={entry.key} value={entry.key}>{records[entry.key]?.error || records[entry.key]?.lastRunError ? '失败 · ' : records[entry.key]?.reviewed ? '✓ ' : records[entry.key] ? '已算 · ' : ''}{entry.path}</option>)}</select><div className="migration-prev-next"><button disabled={!!busy || currentIndex <= 0} onClick={() => void openImage(entries[currentIndex - 1])}>←</button><span>{currentIndex + 1} / {entries.length}</span><button disabled={!!busy || currentIndex === entries.length - 1} onClick={() => void openImage(entries[currentIndex + 1])}>→</button></div></>}
-        <div className="migration-basic-controls">{controls.slice(0, 2).map(control)}</div><details><summary>更多参数</summary><div className="migration-parameter-grid">{controls.slice(2).map(control)}</div>{mode === 'transwell' && <label className="check"><input type="checkbox" checked={(parameters as TranswellParameters).excludeEdge} disabled={!!busy} onChange={event => { setParameters(old => ({ ...old, excludeEdge: event.target.checked })); setEditing(false); }} />排除触边对象</label>}</details>
+        <div className="migration-basic-controls">{controls.slice(0, 2).map(control)}</div><details><summary>更多参数</summary><div className="migration-parameter-grid">{controls.slice(2).map(control)}</div>{mode === 'transwell' && <label className="check"><input type="checkbox" checked={(parameters as TranswellParameters).excludeEdge} disabled={!!busy} onChange={event => { endEditing(true); setParameters(old => ({ ...old, excludeEdge: event.target.checked })); }} />排除触边对象</label>}</details>
         <details className="migration-background-settings"><summary>背景设置</summary><label>目标亮度<input type="number" min={160} max={250} defaultValue={backgroundSettings.target} disabled={!!busy} onBlur={event => { const value = Number(event.target.value); const target = event.target.value && Number.isFinite(value) ? Math.max(160, Math.min(250, value)) : backgroundSettings.target; event.target.value = String(target); updateBackground({ target }); }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }} /></label><label className="check"><input type="checkbox" checked={backgroundSettings.matchColor} disabled={!!busy} onChange={event => updateBackground({ matchColor: event.target.checked })} />同时统一色调</label><p>逐张估计背景，共用目标。仅调整显示与导出，分析仍用原图。</p></details>
         {mode === 'scratch' && <details><summary>边界设置</summary>
           <label>颜色<span className="migration-line-color"><input type="color" aria-label="边界颜色" value={lineStyle.color} disabled={!!busy} onChange={event => updateLineStyle({ color: event.target.value })} /><input key={lineStyle.color} type="text" aria-label="边界颜色 HEX" defaultValue={lineStyle.color} maxLength={7} spellCheck={false} disabled={!!busy} onBlur={event => { const color = /^#[0-9a-f]{6}$/i.test(event.target.value) ? event.target.value.toLowerCase() : lineStyle.color; event.target.value = color; updateLineStyle({ color }); }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }} /></span></label>
@@ -345,11 +384,21 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
         <button className="wide" disabled={!loaded || !!busy} onClick={() => void analyzeCurrent()}>重算此图</button><button className="primary wide" disabled={!entries.length || !!busy} onClick={() => void analyzeAll()}>一键分析全部</button>
         {progress?.running && <div className="migration-progress"><span>{progress.done} / {progress.total}</span><button onClick={() => { cancel.current = true; setMessage('当前图完成后停止。'); }}>停止</button></div>}
         <p className="migration-qc-note">自动结果请核对</p>
-        {record && !record.error && <div className="migration-edit-controls"><button className={editing ? 'selected wide' : 'wide'} disabled={!!busy || stale} onClick={beginEditing}>{editing ? '完成修改' : mode === 'scratch' ? (record.scratch?.boundaries.length ? '编辑左右边界' : '手动画边界') : '添加 / 删除标记'}</button><button className="wide" disabled={!!busy || !record.manualEdited || stale} onClick={resetManual}>恢复自动结果</button><label className="check"><input type="checkbox" checked={record.reviewed} disabled={!!busy || stale || (mode === 'scratch' && !record.scratch?.valid)} onChange={event => updateRecord({ reviewed: event.target.checked })} />已复核</label>{mode === 'scratch' && parsed?.timeHours !== null && parsed?.timeHours !== 0 && closure?.baselinePath && <label className="check"><input type="checkbox" checked={!!record.pairConfirmed} disabled={!!busy || stale} onChange={event => updateRecord({ pairConfirmed: event.target.checked })} />与 0H 为同一视野</label>}</div>}
+        {record && !record.error && <div className="migration-edit-controls">
+          <button className={editing ? 'selected wide' : 'wide'} disabled={!!busy || stale} onClick={beginEditing}>{editing ? '完成修改' : mode === 'scratch' ? (record.scratch?.boundaries.length ? '编辑左右边界' : '手动画边界') : '添加 / 删除标记'}</button>
+          {mode === 'scratch' && editing && <div className="migration-scratch-tools"><div className="migration-edit-modes" aria-label="边界编辑模式">
+            <button className={editMode === 'trace' ? 'selected' : ''} aria-pressed={editMode === 'trace'} disabled={!!busy || stale} onClick={() => { cancelScratchStroke(); setEditMode('trace'); }}>沿边描画</button>
+            <button className={editMode === 'move' ? 'selected' : ''} aria-pressed={editMode === 'move'} disabled={!!busy || stale} onClick={() => { cancelScratchStroke(); setEditMode('move'); }}>局部拖动</button>
+          </div>{editMode === 'move' && <label>影响范围（原图 px）<input type="number" min={1} max={512} step={1} defaultValue={editRadius} disabled={!!busy || stale} onBlur={event => { cancelScratchStroke(); const value = Number(event.target.value); const radius = event.target.value && Number.isFinite(value) ? Math.max(1, Math.min(512, value)) : editRadius; event.target.value = String(radius); setEditRadius(radius); }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }} /></label>}</div>}
+          {mode === 'scratch' && <button className="wide" disabled={!!busy || stale || !undoStack.length} onClick={undoScratch}>撤销一步</button>}
+          <button className="wide" disabled={!!busy || !record.manualEdited || stale} onClick={resetManual}>恢复自动结果</button>
+          <label className="check"><input type="checkbox" checked={record.reviewed} disabled={!!busy || stale || (mode === 'scratch' && !record.scratch?.valid)} onChange={event => updateRecord({ reviewed: event.target.checked })} />已复核</label>
+          {mode === 'scratch' && parsed?.timeHours !== null && parsed?.timeHours !== 0 && closure?.baselinePath && <label className="check"><input type="checkbox" checked={!!record.pairConfirmed} disabled={!!busy || stale} onChange={event => updateRecord({ pairConfirmed: event.target.checked })} />与 0H 为同一视野</label>}
+        </div>}
         <div className="migration-downloads"><button disabled={!exportRows.length || !!busy} onClick={exportCsv}>全部结果 CSV</button><button disabled={!Object.values(records).some(item => !item.error) || !!busy} onClick={() => void exportImages(false)}>全部标记图 ZIP</button><button className="background-export" disabled={!entries.length || !backgroundSettings.enabled || !!busy} onClick={() => void exportImages(true)}>全部调整图 ZIP</button>{downloadLink && <a href={downloadLink.url} download={downloadLink.name}>下载文件</a>}</div>
       </aside><section className="migration-stage-column">
-        <div className="migration-stage"><div className="migration-toolbar"><label className="check"><input type="checkbox" checked={overlay} onChange={event => setOverlay(event.target.checked)} />显示标记</label><label className="check"><input type="checkbox" checked={backgroundSettings.enabled} disabled={!!busy} onChange={event => updateBackground({ enabled: event.target.checked })} />统一背景</label>{editing && <span>{mode === 'scratch' ? (scratchDraft ? '草稿：拖动边界后计算' : '拖动边界修正') : '点击添加；点中标记删除'}</span>}<select aria-label="缩放" value={zoom} onChange={event => setZoom(event.target.value)}><option value="fit">适应视野</option><option value="0.5">50%</option><option value="1">100%</option><option value="2">200%</option></select></div>
-          <div className={`migration-canvas ${loaded ? '' : 'empty'}`} aria-busy={!!busy}>{loaded ? <canvas ref={canvas} style={zoom === 'fit' ? { width: '100%', height: 'auto' } : { width: loaded.frame.width * +zoom, height: loaded.frame.height * +zoom }} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={() => { dragging.current = null; }} onPointerCancel={() => { dragging.current = null; }} aria-label={mode === 'scratch' ? '划痕边界预览，可编辑左右边界' : '穿膜细胞标记预览，可添加或删除候选点'} /> : <div className="migration-empty"><div>{mode === 'scratch' ? 'Ⅱ' : '⠿'}</div><h2>选择图像开始</h2><p>支持 TIFF · PNG · JPEG</p></div>}{busy && <div className="migration-processing" role="status"><i />{busy}</div>}</div>
+        <div className="migration-stage"><div className="migration-toolbar"><label className="check"><input type="checkbox" checked={overlay} onChange={event => { setOverlay(event.target.checked); if (!event.target.checked) endEditing(); }} />显示标记</label><label className="check"><input type="checkbox" checked={backgroundSettings.enabled} disabled={!!busy} onChange={event => updateBackground({ enabled: event.target.checked })} />统一背景</label>{editing && <span>{mode === 'scratch' ? (editMode === 'trace' ? '从边界旁描画，抬起完成' : '局部拖动，保留凹凸') : '点击添加；点中标记删除'}</span>}<select aria-label="缩放" value={zoom} onChange={event => setZoom(event.target.value)}><option value="fit">适应视野</option><option value="0.5">50%</option><option value="1">100%</option><option value="2">200%</option></select></div>
+          <div className={`migration-canvas ${loaded ? '' : 'empty'}`} aria-busy={!!busy}>{loaded ? <canvas ref={canvas} style={zoom === 'fit' ? { width: '100%', height: 'auto' } : { width: loaded.frame.width * +zoom, height: loaded.frame.height * +zoom }} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={event => { if (stroke.current?.pointerId === event.pointerId) cancelScratchStroke(); }} onLostPointerCapture={event => { if (stroke.current?.pointerId === event.pointerId) cancelScratchStroke(); }} aria-label={mode === 'scratch' ? '划痕边界预览，可沿边描画或局部拖动' : '穿膜细胞标记预览，可添加或删除候选点'} /> : <div className="migration-empty"><div>{mode === 'scratch' ? 'Ⅱ' : '⠿'}</div><h2>选择图像开始</h2><p>支持 TIFF · PNG · JPEG</p></div>}{busy && <div className="migration-processing" role="status"><i />{busy}</div>}</div>
           <div className="migration-meta"><span>{active?.path || '图像保留在本机'}</span><span>{loaded ? `${loaded.frame.width} × ${loaded.frame.height} px` : ''}</span></div></div>
         {record?.lastRunError && <div className="migration-stale">本次处理失败，当前显示保留的人工结果。</div>}
         {stale && <div className="migration-stale">参数或算法已改变，当前保留旧结果。点击「重算此图」更新。</div>}
@@ -358,7 +407,7 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
         {record && !record.error && <div className="migration-stats">{mode === 'scratch' ? <><article><span>伤口面积</span><strong>{numberText(record.areaPx)}</strong><small>px²</small></article><article><span>平均宽度</span><strong>{numberText(record.meanWidthPx, 1)}</strong><small>px</small></article><article><span>{record.pairConfirmed ? '闭合率' : '闭合率（待核对）'}</span><strong>{closure?.closurePct == null ? '—' : `${numberText(closure.closurePct, 1)}%`}</strong><small>{closure?.status}</small></article></> : <><article><span>自动估计数</span><strong>{record.autoCount}</strong></article><article><span>修正后计数</span><strong>{record.correctedCount}</strong></article><article><span>染色覆盖率</span><strong>{numberText(record.coveragePct, 1)}%</strong><small>大团块 {record.clusterCount ?? 0}</small></article></>}</div>}
         {record?.warnings.length ? <details className="migration-warning"><summary>质控提示 ({record.warnings.length})</summary><ul>{record.warnings.map((warning, i) => <li key={i}>{warning}</li>)}</ul></details> : null}
         {progress && !progress.running && progress.issues.length > 0 && <details className="migration-warning"><summary>批量处理明细 ({progress.issues.length})</summary><ul>{progress.issues.map((issue, i) => <li key={i}>{issue}</li>)}</ul></details>}
-        <details className="migration-method"><summary>方法与说明</summary>{mode === 'scratch' ? <p>按局部纹理估计纵向划痕左右边界，以边界积分计算面积和平均宽度。可拖动锚点修正；无法识别时不填假零值。闭合率需同一视野 0H、相同尺寸和 ROI；文件名配对仅作提示，必须人工核对。</p> : <p>按染色与亮度筛选区域，再根据空间峰估计穿膜细胞中心；可点击增删标记。重叠细胞、大团块、膜孔和杂质会影响自动计数，请核对；染色面积和覆盖率另行保留。这里只分析图像，不自动划分实验组。</p>}<p>参数变化后旧结果会明确标记。批量会保留参数不同的人工结果；CSV 包含失败、复核、参数和文件来源。关闭页面前请导出。</p></details>
+        <details className="migration-method"><summary>方法与说明</summary>{mode === 'scratch' ? <p>按局部纹理估计纵向划痕左右边界，以边界积分计算面积和平均宽度。可沿边描画或局部拖动修正，保留范围外边界；每笔抬起后更新面积，可撤销。无法识别时不填假零值。闭合率需同一视野 0H、相同尺寸和 ROI；文件名配对仅作提示，必须人工核对。</p> : <p>按染色与亮度筛选区域，再根据空间峰估计穿膜细胞中心；可点击增删标记。重叠细胞、大团块、膜孔和杂质会影响自动计数，请核对；染色面积和覆盖率另行保留。这里只分析图像，不自动划分实验组。</p>}<p>参数变化后旧结果会明确标记。批量会保留参数不同的人工结果；CSV 包含失败、复核、参数和文件来源。关闭页面前请导出。</p></details>
       </section></div>
     </main>
   </div>;
