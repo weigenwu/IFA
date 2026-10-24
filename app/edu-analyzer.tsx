@@ -501,7 +501,7 @@ export default function EduAnalyzer() {
   const selectedCell = result?.nuclei.find(cell => cell.id === selected);
   const fieldLabel = isDemo ? '合成演示' : `${index + 1} / ${fields.length}`;
   return <div className="edu-app edu-compact edu-three">
-    <header className="edu-header"><a className="edu-brand" href="../"><span className="edu-brand-icon">✳</span> FluoroScope</a><nav><a href="../intensity/">荧光强度</a><a href="../colocalization/">共定位</a><a href="../edu/" aria-current="page">EdU</a></nav><span className="edu-local"><i /> 图像仅在本地处理</span></header>
+    <header className="edu-header"><a className="edu-brand" href="../"><span className="edu-brand-icon">✳</span> FluoroScope</a><nav><a href="../intensity/">荧光强度</a><a href="../colocalization/">共定位</a><a href="../edu/" aria-current="page">EdU</a><a href="../scratch/">细胞划痕</a><a href="../transwell/">Transwell</a></nav><span className="edu-local"><i /> 图像仅在本地处理</span></header>
     <main className="edu-main">
       <div className="edu-heading"><h1>EdU 去碎片</h1><div className="edu-heading-actions"><button className="edu-quiet" onClick={openDemo} disabled={!!busy}>演示</button><button onClick={() => filesInput.current?.click()} disabled={!!busy}>选择图像</button><button className="edu-primary" onClick={() => folderInput.current?.click()} disabled={!!busy}>导入文件夹</button></div></div>
       <input className="edu-hidden" ref={folderInput} type="file" multiple {...({ webkitdirectory: '' } as Record<string, string>)} onChange={event => { void importFiles(event.target.files); event.target.value = ''; }} />

@@ -3,14 +3,14 @@ export default function Home() {
     <main className="app-shell portal-shell">
       <header className="topbar">
         <a className="brand" href="./" aria-label="FluoroScope 首页"><span className="brand-mark" aria-hidden="true"><i /><i /></span><span>FluoroScope</span></a>
-        <nav aria-label="分析工具"><a href="./colocalization/">荧光共定位</a><a href="./intensity/">荧光强度</a><a href="./edu/">EdU / 去杂色</a></nav>
+        <nav aria-label="分析工具"><a href="./colocalization/">荧光共定位</a><a href="./intensity/">荧光强度</a><a href="./edu/">EdU</a><a href="./scratch/">细胞划痕</a><a href="./transwell/">Transwell</a></nav>
         <span className="privacy-badge"><i /> 公开使用 · 无需登录</span>
       </header>
 
       <section className="portal-intro">
-        <p className="eyebrow">IMMUNOFLUORESCENCE</p>
-        <h1>免疫荧光分析</h1>
-        <p className="lede">直接打开 OIR / TIFF，本地处理，无需登录。</p>
+        <p className="eyebrow">MICROSCOPY · LOCAL ANALYSIS</p>
+        <h1>细胞图像分析</h1>
+        <p className="lede">荧光、划痕与穿膜细胞。本地处理，无需登录。</p>
       </section>
 
       <section className="tool-portal" aria-label="选择分析工具">
@@ -33,6 +33,18 @@ export default function Home() {
           <span className="tool-index">03 · EdU & BACKGROUND</span>
           <h2>EdU 分析与去杂色</h2>
           <p>文件夹导入、碎点清理、核分割与阳性率。</p>
+          <strong>打开 <span>→</span></strong>
+        </a>
+        <a className="tool-card coloc-tool" href="./scratch/">
+          <span className="tool-index">04 · SCRATCH ASSAY</span>
+          <h2>细胞划痕</h2>
+          <p>面积、宽度、闭合率；批量计算与边界修正。</p>
+          <strong>打开 <span>→</span></strong>
+        </a>
+        <a className="tool-card intensity-tool" href="./transwell/">
+          <span className="tool-index">05 · TRANSWELL</span>
+          <h2>穿膜细胞计数</h2>
+          <p>计数估计、染色覆盖率；批量计算与人工校正。</p>
           <strong>打开 <span>→</span></strong>
         </a>
       </section>

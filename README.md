@@ -2,16 +2,21 @@
 
 新增入口：[EdU 分析与去杂色](https://weigenwu.github.io/IFA/edu/)。支持文件夹按视野导入、红色碎片显示清理、核候选与 EdU 阳性比例、人工复核及 CSV/JSON 导出；全部在浏览器本地处理。详见 [EdU 方法与使用边界](docs/EDU_METHOD.md)。
 
-两个在浏览器本地运行的免疫荧光分析工具：**荧光共定位**与**荧光强度/线扫描**。Olympus FV3000 OIR 和 TIFF 图像都不会上传到服务器，也不需要账号登录；原始像素用于计算，画布仅用于显示。
+新增入口：[细胞划痕](https://weigenwu.github.io/IFA/scratch/)与 [Transwell 穿膜细胞计数](https://weigenwu.github.io/IFA/transwell/)。支持文件夹批量计算、边界/计数点修正、全部结果 CSV 和标记图 ZIP；不自动分组。详见 [划痕与 Transwell 方法](docs/MIGRATION_METHOD.md)。
+
+在浏览器本地运行的细胞图像分析工具。Olympus FV3000 OIR 和 TIFF 图像不会上传到服务器，也不需要账号登录。
 
 **公开入口（无需登录）：<https://weigenwu.github.io/IFA/>**
 
 备用入口：<https://fluoroscope-ifa.yu2898296277.chatgpt.site>
 
-## 两个独立入口
+## 分析入口
 
 - `/colocalization`：从多通道图像中任选 A/B，输出 Pearson、Manders、阈值、散点图与共定位 Mask。
 - `/intensity`：确认 1–8 个通道，设置 Olympus 伪彩、ImageJ 风格显示范围和背景杂色抑制，框选可缩放正方形 ROI，输出强度指标、双通道线扫描及带比例尺的裁切图。
+- `/edu`：文件夹 EdU 批量统计与同步 DAPI/RED/Merge 去杂色导出。
+- `/scratch`：竖向划痕面积、平均宽度，按同名 0H/24H/48H 文件建议配对计算闭合率。
+- `/transwell`：蓝紫染色分割、候选计数点、染色覆盖率；可增删点并保留自动与修正后估计数。
 
 ## 输入适配
 

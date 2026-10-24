@@ -863,7 +863,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     <main className="app-shell" id="top">
       <header className="topbar">
         <a className="brand" href="../" aria-label="FluoroScope 首页"><span className="brand-mark" aria-hidden="true"><i /><i /></span><span>FluoroScope</span></a>
-        <nav aria-label="分析工具"><a className={isColoc ? 'active' : ''} href="../colocalization/">荧光共定位</a><a className={!isColoc ? 'active' : ''} href="../intensity/">荧光强度</a><a href="../edu/">EdU / 去杂色</a></nav>
+        <nav aria-label="分析工具"><a className={isColoc ? 'active' : ''} href="../colocalization/">荧光共定位</a><a className={!isColoc ? 'active' : ''} href="../intensity/">荧光强度</a><a href="../edu/">EdU</a><a href="../scratch/">细胞划痕</a><a href="../transwell/">Transwell</a></nav>
         <span className="privacy-badge"><i /> 本地分析 · 无需登录</span>
       </header>
 
