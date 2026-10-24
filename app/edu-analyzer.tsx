@@ -11,7 +11,7 @@ import './edu.css';
 type Field = { id: string; name: string; group: string; files: File[] };
 type Revision = 'positive' | 'negative' | 'exclude';
 type Exclusion = { enabled: boolean; width: number; height: number };
-type DisplaySnapshot = { key: string; field: string; sourceHash: string; directory: string; synthetic: boolean; entries: ExportArchiveEntry[] };
+type DisplaySnapshot = { key: string; field: string; sourceHash: string; imageFiles: string[]; settingsFile: string; synthetic: boolean; entries: ExportArchiveEntry[] };
 type BatchProgress = { running: boolean; completed: number; total: number; computed: number; reused: number; protected: number; failed: number; stopped: boolean; issues: Array<{ field: string; reason: string }> };
 type AnalysisSource = { image: LoadedImage; id: string; files: string[]; group: string; indices: [number, number]; parameters: EduParameters; exclusion: Exclusion; synthetic: boolean };
 type DisplaySource = Omit<AnalysisSource, 'parameters' | 'exclusion'> & { cleanup: CleanupParameters };
@@ -326,16 +326,18 @@ export default function EduAnalyzer() {
     if (!source) throw new Error('请先选择图像。');
     const { image: input, indices, cleanup: settings } = source;
     const blue = input.channels[indices[0]], red = input.channels[indices[1]];
-    return { schema: 'fluoroscope-edu-display-v2', timestamp: new Date().toISOString(), field: source.id, group: source.group, purpose: 'Display derivative only, not for quantitative analysis', sourceFiles: source.files, sourceHash: input.hash, hashKind: input.sourceFiles.length > 1 ? 'SHA256 of newline-joined individual SHA256 hashes in input order' : 'SHA256 of original file', synthetic: source.synthetic, dimensions: [input.width, input.height], channels: { nucleus: blue.label, edu: red.label }, display: { redFloor: settings.redFloor, blueFloor: settings.blueFloor, redFloorNative: settings.redFloor / 255 * red.maxValue, blueFloorNative: settings.blueFloor / 255 * blue.maxValue, thresholdUiScale: '0..255 normalized to channel full scale', redMinArea: settings.redMinArea, blueMinArea: settings.blueMinArea, protectNuclear: settings.protectNuclear, onlyNuclear: settings.onlyNuclear, nucleusSupportThreshold: settings.nucleusThreshold, nucleusSupportThresholdNative: settings.nucleusThreshold / 255 * blue.maxValue, nucleusSupportMinArea: settings.nucleusMinArea, nucleusFullScale: blue.maxValue, eduFullScale: red.maxValue, exports: ['01_DAPI.png', '02_RED.png', '03_Merge.png'], greenPreservedInMerge: Boolean(greenFor(input, indices)), outputBitDepth: 8 }, warnings: input.warnings };
+    const key = `${input.hash}\n${source.id}`;
+    let ordinal = snapshotOrdinals.current.get(key);
+    if (!ordinal) { ordinal = snapshotOrdinals.current.size + 1; snapshotOrdinals.current.set(key, ordinal); }
+    const stem = `${String(ordinal).padStart(4, '0')}_${source.synthetic ? 'DEMO_' : ''}${safeFilePart(source.id.split(/[\\/]/).pop() || source.id)}`;
+    return { schema: 'fluoroscope-edu-display-v3', settingsFile: `_metadata/${stem}.settings.json`, timestamp: new Date().toISOString(), field: source.id, group: source.group, purpose: 'Display derivative only, not for quantitative analysis', sourceFiles: source.files, sourceHash: input.hash, hashKind: input.sourceFiles.length > 1 ? 'SHA256 of newline-joined individual SHA256 hashes in input order' : 'SHA256 of original file', synthetic: source.synthetic, dimensions: [input.width, input.height], channels: { nucleus: blue.label, edu: red.label }, display: { redFloor: settings.redFloor, blueFloor: settings.blueFloor, redFloorNative: settings.redFloor / 255 * red.maxValue, blueFloorNative: settings.blueFloor / 255 * blue.maxValue, thresholdUiScale: '0..255 normalized to channel full scale', redMinArea: settings.redMinArea, blueMinArea: settings.blueMinArea, protectNuclear: settings.protectNuclear, onlyNuclear: settings.onlyNuclear, nucleusSupportThreshold: settings.nucleusThreshold, nucleusSupportThresholdNative: settings.nucleusThreshold / 255 * blue.maxValue, nucleusSupportMinArea: settings.nucleusMinArea, nucleusFullScale: blue.maxValue, eduFullScale: red.maxValue, exports: DISPLAY_CHANNELS.map(channel => `${stem}_${channel}.png`), greenPreservedInMerge: Boolean(greenFor(input, indices)), outputBitDepth: 8 }, warnings: input.warnings };
   }
   async function captureDisplay(source = currentDisplaySource(), pixelsData = cleaned, progressPrefix = '正在保存'): Promise<DisplaySnapshot> {
     if (!source || !pixelsData) throw new Error('请先生成去碎片预览。');
     const { image: input, indices } = source;
     const blue = input.channels[indices[0]], red = input.channels[indices[1]], green = greenFor(input, indices);
     const key = `${input.hash}\n${source.id}`, settings = displaySettings(source);
-    let ordinal = snapshotOrdinals.current.get(key);
-    if (!ordinal) { ordinal = snapshotOrdinals.current.size + 1; snapshotOrdinals.current.set(key, ordinal); }
-    const directory = `${String(ordinal).padStart(4, '0')}_${source.synthetic ? 'DEMO_' : ''}${safeFilePart(source.id)}`;
+    const imageFiles = settings.display.exports, settingsFile = settings.settingsFile;
     const output = document.createElement('canvas'); output.width = input.width; output.height = input.height;
     const context = output.getContext('2d'); if (!context) throw new Error('浏览器无法生成导出图像。');
     const pixels = context.createImageData(input.width, input.height);
@@ -352,17 +354,17 @@ export default function EduAnalyzer() {
         }
         context.putImageData(pixels, 0, 0);
         const blob = await new Promise<Blob>((resolve, reject) => output.toBlob(value => value ? resolve(value) : reject(new Error(`${DISPLAY_CHANNELS[panel]} PNG 编码失败，请重试。`)), 'image/png'));
-        entries.push({ name: `${directory}/0${panel + 1}_${DISPLAY_CHANNELS[panel]}.png`, data: new Uint8Array(await blob.arrayBuffer()) });
+        entries.push({ name: imageFiles[panel], data: new Uint8Array(await blob.arrayBuffer()) });
       }
     } finally { output.width = 0; output.height = 0; }
-    entries.push({ name: `${directory}/settings.json`, data: new TextEncoder().encode(JSON.stringify(settings, null, 2)) });
-    return { key, field: source.id, sourceHash: input.hash, directory, synthetic: source.synthetic, entries };
+    entries.push({ name: settingsFile, data: new TextEncoder().encode(JSON.stringify(settings, null, 2)) });
+    return { key, field: source.id, sourceHash: input.hash, imageFiles, settingsFile, synthetic: source.synthetic, entries };
   }
   async function publishDisplayZip(snapshots: Record<string, DisplaySnapshot>, batchSummary?: ReturnType<typeof cleanupBatchSummary>, frozenParameters?: CleanupParameters) {
     const items = Object.values(snapshots);
     if (!items.length) throw new Error('没有成功处理的视野，未生成 ZIP。');
     setBusy(`正在打包 ${items.length} 个视野…`); await pause();
-    const manifest = new TextEncoder().encode(JSON.stringify({ schema: 'fluoroscope-edu-batch-v2', exportedAt: new Date().toISOString(), fieldCount: items.length, purpose: 'Display derivatives only, not for quantitative analysis', ...(batchSummary ?? {}), ...(frozenParameters ? { frozenCleanupParameters: frozenParameters } : {}), fields: items.map(({ field, sourceHash, directory, synthetic }) => ({ field, sourceHash, directory, synthetic })) }, null, 2));
+    const manifest = new TextEncoder().encode(JSON.stringify({ schema: 'fluoroscope-edu-batch-v3', exportedAt: new Date().toISOString(), fieldCount: items.length, purpose: 'Display derivatives only, not for quantitative analysis', ...(batchSummary ?? {}), ...(frozenParameters ? { frozenCleanupParameters: frozenParameters } : {}), fields: items.map(({ field, sourceHash, imageFiles, settingsFile, synthetic }) => ({ field, sourceHash, imageFiles, settingsFile, synthetic })) }, null, 2));
     const archive = await createStoredZip([...items.flatMap(item => item.entries), { name: 'manifest.json', data: manifest }]);
     const url = URL.createObjectURL(new Blob([archive], { type: 'application/zip' }));
     const name = `EdU_${batchSummary ? '本批清理_' : ''}${items.length}视野${batchSummary?.partial ? '_部分完成' : ''}_DAPI_RED_Merge.zip`;
