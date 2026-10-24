@@ -6,6 +6,7 @@ export interface MigrationCsvRow {
   height?: number;
   paramsJson: string;
   sourceHash?: string;
+  algorithmVersion?: string;
   status?: string;
   roiTopPct?: number;
   roiBottomPct?: number;
@@ -47,6 +48,7 @@ export function scratchClosure(row: MigrationCsvRow, rows: MigrationCsvRow[]) {
   const baseline = candidates[0];
   if (baseline.error || baseline.areaPx == null || !Number.isFinite(baseline.areaPx) || baseline.areaPx <= 0) return no('0H面积无效', baseline.path);
   if (!row.width || !row.height || row.width !== baseline.width || row.height !== baseline.height) return no('图像尺寸不一致', baseline.path);
+  if (row.algorithmVersion !== baseline.algorithmVersion) return no('算法版本不一致', baseline.path);
   if (row.paramsJson !== baseline.paramsJson || row.roiTopPct !== baseline.roiTopPct || row.roiBottomPct !== baseline.roiBottomPct) return no('分析参数或ROI不一致', baseline.path);
   return {
     closurePct: (baseline.areaPx - row.areaPx) / baseline.areaPx * 100,
@@ -63,13 +65,13 @@ function csvCell(value: unknown) {
 }
 
 export function makeMigrationCsv(mode: MigrationMode, rows: MigrationCsvRow[]) {
-  const common = ['文件路径', '源文件_SHA256', '宽_px', '高_px', '状态', '已复核', '人工修正', '分析参数_JSON', '提示'];
+  const common = ['文件路径', '源文件_SHA256', '算法版本', '宽_px', '高_px', '状态', '已复核', '人工修正', '分析参数_JSON', '提示'];
   const columns = mode === 'scratch'
     ? ['同名视野', '时间_h', '伤口面积_px2', '平均宽度_px', 'ROI上缘_%', 'ROI下缘_%', '0H文件', '闭合率_%', '配对状态']
     : ['自动估计数', '修正后估计数', '染色面积_px2', '染色覆盖率_%', '大团块数'];
   const lines = [common.concat(columns).map(csvCell).join(',')];
   for (const row of rows) {
-    const values: unknown[] = [row.path, row.sourceHash, row.width, row.height, row.error ? `失败：${row.error}` : row.status || '完成', row.reviewed ? '是' : '否', row.manualEdited ? '是' : '否', row.paramsJson, row.warnings.join('；')];
+    const values: unknown[] = [row.path, row.sourceHash, row.algorithmVersion, row.width, row.height, row.error ? `失败：${row.error}` : row.status || '完成', row.reviewed ? '是' : '否', row.manualEdited ? '是' : '否', row.paramsJson, row.warnings.join('；')];
     if (mode === 'scratch') {
       const parsed = parseScratchFile(row.path);
       const closure = scratchClosure(row, rows);

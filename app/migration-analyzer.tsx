@@ -1,10 +1,11 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { loadImages, type LoadedImage } from '../lib/image';
 import { createStoredZip, safeFilePart, type ExportArchiveEntry } from '../lib/export-archive';
-import { DEFAULT_SCRATCH_PARAMETERS, DEFAULT_TRANSWELL_PARAMETERS, measureScratch, type RGBAFrame, type ScratchParameters, type ScratchResult, type ScratchBoundary, type TranswellParameters, type TranswellResult } from '../lib/migration';
+import { DEFAULT_SCRATCH_PARAMETERS, DEFAULT_TRANSWELL_PARAMETERS, SCRATCH_ALGORITHM_VERSION, measureScratch, type RGBAFrame, type ScratchParameters, type ScratchResult, type ScratchBoundary, type TranswellParameters, type TranswellResult } from '../lib/migration';
 import { makeMigrationCsv, scratchClosure, parseScratchFile, type MigrationCsvRow } from '../lib/migration-batch';
+import { DEFAULT_BACKGROUND_SETTINGS, estimateBackground, normalizeBackground, type BackgroundEstimate, type BackgroundSettings } from '../lib/brightfield-display';
 import './migration.css';
 
 type Mode = 'scratch' | 'transwell';
@@ -12,7 +13,7 @@ type Parameters = ScratchParameters | TranswellParameters;
 type Entry = { key: string; path: string; file: File };
 type Point = { x: number; y: number };
 type ResultRecord = MigrationCsvRow & { key: string; scratch?: ScratchResult; autoScratch?: ScratchResult; points?: Point[]; autoPoints?: Point[]; updatedAt: string; lastRunError?: string };
-type Loaded = { frame: RGBAFrame; hash: string; warnings: string[] };
+type Loaded = { frame: RGBAFrame; hash: string; warnings: string[]; background: BackgroundEstimate };
 type Progress = { running: boolean; done: number; total: number; failed: number; skipped: number; stopped: boolean; issues: string[] };
 const SUPPORTED = /\.(png|jpe?g|tiff?|bmp|webp)$/i;
 const tick = () => new Promise<void>(resolve => setTimeout(resolve, 0));
@@ -47,7 +48,7 @@ async function readEntry(entry: Entry): Promise<Loaded> {
   }
   // Fluorescence-channel warnings do not apply to the intended brightfield RGB input.
   const sourceWarnings = image.warnings.filter(warning => !warning.startsWith('检测到 RGB 合并展示图') && !warning.startsWith('分析使用 TIFF 原始位深'));
-  return { frame, hash: image.hash, warnings: [...sourceWarnings, ...(image.channels.some(channel => channel.bitDepth > 8) ? ['算法按原始满量程映射到 8-bit 明场图；原文件保留。'] : [])] };
+  return { frame, hash: image.hash, background: estimateBackground(frame), warnings: [...sourceWarnings, ...(image.channels.some(channel => channel.bitDepth > 8) ? ['算法按原始满量程映射到 8-bit 明场图；原文件保留。'] : [])] };
 }
 function processFrame(mode: Mode, frame: RGBAFrame, parameters: Parameters): Promise<ScratchResult | TranswellResult> {
   return new Promise((resolve, reject) => {
@@ -58,7 +59,7 @@ function processFrame(mode: Mode, frame: RGBAFrame, parameters: Parameters): Pro
   });
 }
 function makeRecord(entry: Entry, loaded: Loaded, parameters: Parameters, result: ScratchResult | TranswellResult, mode: Mode): ResultRecord {
-  const base: ResultRecord = { key: entry.key, path: entry.path, width: loaded.frame.width, height: loaded.frame.height, sourceHash: loaded.hash, paramsJson: JSON.stringify(parameters), reviewed: false, manualEdited: false, pairConfirmed: false, warnings: [...loaded.warnings, ...result.qc], updatedAt: new Date().toISOString() };
+  const base: ResultRecord = { key: entry.key, path: entry.path, width: loaded.frame.width, height: loaded.frame.height, sourceHash: loaded.hash, algorithmVersion: mode === 'scratch' ? SCRATCH_ALGORITHM_VERSION : 'transwell-v1', paramsJson: JSON.stringify(parameters), reviewed: false, manualEdited: false, pairConfirmed: false, warnings: [...loaded.warnings, ...result.qc], updatedAt: new Date().toISOString() };
   if (mode === 'scratch') {
     const scratch = result as ScratchResult, params = parameters as ScratchParameters;
     return { ...base, areaPx: scratch.areaPx, meanWidthPx: scratch.meanWidthPx, roiTopPct: params.roiTopPct, roiBottomPct: params.roiBottomPct, scratch, autoScratch: scratch };
@@ -76,24 +77,25 @@ function drawOverlay(context: CanvasRenderingContext2D, frame: RGBAFrame, record
   const width = Math.max(2, frame.width / 600);
   if (record.scratch?.boundaries.length) {
     const edges = record.scratch.boundaries;
-    context.beginPath(); context.moveTo(edges[0].left, edges[0].y);
-    edges.slice(1).forEach(edge => context.lineTo(edge.left, edge.y));
-    [...edges].reverse().forEach(edge => context.lineTo(edge.right, edge.y));
-    context.closePath(); context.fillStyle = 'rgba(19,166,142,.17)'; context.fill();
-    context.lineWidth = width; context.strokeStyle = '#12b99e';
+    context.lineWidth = Math.max(2, frame.width / 600); context.strokeStyle = '#e88d89';
     for (const side of ['left', 'right'] as const) { context.beginPath(); edges.forEach((edge, i) => i ? context.lineTo(edge[side], edge.y) : context.moveTo(edge[side], edge.y)); context.stroke(); }
-    if (anchors) for (const i of anchorIndices(edges)) for (const side of ['left', 'right'] as const) { context.beginPath(); context.arc(edges[i][side], edges[i].y, width * 3, 0, Math.PI * 2); context.fillStyle = '#fff'; context.fill(); context.strokeStyle = '#087e70'; context.stroke(); }
+    if (anchors) for (const i of anchorIndices(edges)) for (const side of ['left', 'right'] as const) { context.beginPath(); context.arc(edges[i][side], edges[i].y, width * 3, 0, Math.PI * 2); context.fillStyle = '#fff'; context.fill(); context.strokeStyle = '#c26660'; context.stroke(); }
   } else if (record.points) {
     context.lineWidth = width; context.strokeStyle = '#11b9a6';
     for (const point of record.points) { context.beginPath(); context.arc(point.x, point.y, Math.max(4, frame.width / 220), 0, Math.PI * 2); context.stroke(); }
   }
 }
+function displayMetadata(settings: BackgroundSettings, result: ReturnType<typeof normalizeBackground>) {
+  return { settings, estimate: result.estimate, gains: result.gains, clippedFraction: result.clippedFraction, warnings: result.warnings, displayOnly: true, analysisUsesRawPixels: true };
+}
 
 export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
   const title = mode === 'scratch' ? '划痕分析' : 'Transwell 穿膜细胞计数';
+  const currentVersion = mode === 'scratch' ? SCRATCH_ALGORITHM_VERSION : 'transwell-v1';
   const [entries, setEntries] = useState<Entry[]>([]), [activeKey, setActiveKey] = useState('');
   const [loaded, setLoaded] = useState<Loaded | null>(null), [records, setRecords] = useState<Record<string, ResultRecord>>({});
   const [parameters, setParameters] = useState<Parameters>(mode === 'scratch' ? DEFAULT_SCRATCH_PARAMETERS : DEFAULT_TRANSWELL_PARAMETERS);
+  const [backgroundSettings, setBackgroundSettings] = useState<BackgroundSettings>(DEFAULT_BACKGROUND_SETTINGS);
   const [busy, setBusy] = useState(''), [error, setError] = useState(''), [message, setMessage] = useState('');
   const [overlay, setOverlay] = useState(true), [editing, setEditing] = useState(false), [zoom, setZoom] = useState('fit');
   const [scratchDraft, setScratchDraft] = useState<ScratchBoundary[] | null>(null);
@@ -102,13 +104,14 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
   const cancel = useRef(false), loadVersion = useRef(0);
   const dragging = useRef<{ side: 'left' | 'right'; index: number; boundaries: ScratchBoundary[] } | null>(null);
   const paramsJson = JSON.stringify(parameters), active = entries.find(entry => entry.key === activeKey), record = records[activeKey];
-  const currentIndex = entries.findIndex(entry => entry.key === activeKey), stale = Boolean(record && record.paramsJson !== paramsJson);
+  const currentIndex = entries.findIndex(entry => entry.key === activeKey), stale = Boolean(record && (record.paramsJson !== paramsJson || record.algorithmVersion !== currentVersion));
   const exportRows: MigrationCsvRow[] = entries.map(entry => {
     const item = records[entry.key];
-    return item ? { ...item, error: item.error ?? item.lastRunError, status: item.lastRunError ? '本次失败；保留人工结果' : item.error ? '失败' : item.paramsJson !== paramsJson ? '参数已改变；保留原结果' : item.reviewed ? '已复核' : item.manualEdited ? '已修正，待复核' : '自动结果，待复核' } : { path: entry.path, paramsJson, reviewed: false, manualEdited: false, warnings: [], status: '未处理' };
+    return item ? { ...item, error: item.error ?? item.lastRunError, status: item.lastRunError ? '本次失败；保留人工结果' : item.error ? '失败' : item.paramsJson !== paramsJson || item.algorithmVersion !== currentVersion ? '参数/算法已改变；保留原结果' : item.reviewed ? '已复核' : item.manualEdited ? '已修正，待复核' : '自动结果，待复核' } : { path: entry.path, paramsJson, algorithmVersion: currentVersion, reviewed: false, manualEdited: false, warnings: [], status: '未处理' };
   });
   const closure = mode === 'scratch' && record ? scratchClosure(record, exportRows) : null;
   const parsed = active && mode === 'scratch' ? parseScratchFile(active.path) : null;
+  const display = useMemo(() => loaded ? normalizeBackground(loaded.frame, backgroundSettings, loaded.background) : null, [loaded, backgroundSettings]);
 
   function fail(entry: Entry, frozen: Parameters, cause: unknown, source?: Loaded) {
     const reason = cause instanceof Error ? cause.message : String(cause);
@@ -117,7 +120,7 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
       setRecords(old => ({ ...old, [entry.key]: { ...previous, lastRunError: reason, warnings: [...previous.warnings.filter(warning => !warning.startsWith('本次处理失败')), `本次处理失败，保留人工结果：${reason}`], updatedAt: new Date().toISOString() } }));
       return reason;
     }
-    const failed: ResultRecord = { key: entry.key, path: entry.path, paramsJson: JSON.stringify(frozen), width: source?.frame.width, height: source?.frame.height, sourceHash: source?.hash, reviewed: false, manualEdited: false, warnings: [], error: reason, updatedAt: new Date().toISOString() };
+    const failed: ResultRecord = { key: entry.key, path: entry.path, paramsJson: JSON.stringify(frozen), algorithmVersion: currentVersion, width: source?.frame.width, height: source?.frame.height, sourceHash: source?.hash, reviewed: false, manualEdited: false, warnings: [], error: reason, updatedAt: new Date().toISOString() };
     setRecords(old => ({ ...old, [entry.key]: failed })); return reason;
   }
   async function openImage(entry: Entry) {
@@ -128,7 +131,7 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
       source = await readEntry(entry); if (version !== loadVersion.current) return;
       setLoaded(source);
       const existing = records[entry.key];
-      if (existing && existing.sourceHash === source.hash && !existing.error) {
+      if (existing && existing.sourceHash === source.hash && !existing.error && ((existing.paramsJson === paramsJson && existing.algorithmVersion === currentVersion) || existing.manualEdited || existing.reviewed)) {
         if (existing.lastRunError) setRecords(old => ({ ...old, [entry.key]: { ...existing, lastRunError: undefined, warnings: existing.warnings.filter(warning => !warning.startsWith('本次处理失败')) } }));
         setBusy(''); return;
       }
@@ -170,13 +173,13 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
         if (cancel.current) { status.stopped = true; break; }
         const entry = queue[i], previous = records[entry.key];
         setBusy(`正在分析 ${i + 1} / ${queue.length}…`); await tick();
-        if (previous && !previous.error && (previous.manualEdited || previous.reviewed) && previous.paramsJson !== signature) {
-          status.skipped++; status.issues.push(`${entry.path}：参数不同，保留人工结果。`);
+        if (previous && !previous.error && (previous.manualEdited || previous.reviewed) && (previous.paramsJson !== signature || previous.algorithmVersion !== currentVersion)) {
+          status.skipped++; status.issues.push(`${entry.path}：参数或算法不同，保留人工结果。`);
         } else {
           let source: Loaded | undefined;
           try {
             source = entry.key === activeKey && loaded ? loaded : await readEntry(entry);
-            if (!previous || previous.error || previous.sourceHash !== source.hash || previous.paramsJson !== signature) {
+            if (!previous || previous.error || previous.sourceHash !== source.hash || previous.paramsJson !== signature || previous.algorithmVersion !== currentVersion) {
               const result = await processFrame(mode, source.frame, frozen);
               const next = makeRecord(entry, source, frozen, result, mode);
               setRecords(old => ({ ...old, [entry.key]: next }));
@@ -192,6 +195,9 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
   function updateRecord(change: Partial<ResultRecord>) {
     if (!record) return;
     setRecords(old => ({ ...old, [activeKey]: { ...old[activeKey], ...change, updatedAt: new Date().toISOString() } })); setDownloadLink(null);
+  }
+  function updateBackground(change: Partial<BackgroundSettings>) {
+    setBackgroundSettings(old => ({ ...old, ...change })); setDownloadLink(null);
   }
   function beginEditing() {
     if (!record || !loaded || stale) return;
@@ -258,39 +264,59 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
     const link = document.createElement('a'); link.href = url; link.download = name; link.click();
   }
   function exportCsv() { presentDownload(new Blob([makeMigrationCsv(mode, exportRows)], { type: 'text/csv;charset=utf-8' }), `${mode === 'scratch' ? '划痕' : 'Transwell'}_全部结果.csv`); }
-  async function exportOverlays() {
-    const targets = entries.filter(entry => records[entry.key] && !records[entry.key].error);
-    if (!targets.length || busy) return;
-    setBusy('正在生成标记图…'); setError(''); setDownloadLink(null); setEditing(false); setScratchDraft(null);
-    const files: ExportArchiveEntry[] = [], issues: string[] = [];
+  async function exportImages(adjustedOnly: boolean) {
+    const targets = adjustedOnly ? [...entries] : entries.filter(entry => records[entry.key] && !records[entry.key].error);
+    if (!targets.length || busy || (adjustedOnly && !backgroundSettings.enabled)) return;
+    const frozen = { ...backgroundSettings }, label = adjustedOnly ? '调整图' : '标记图';
+    const status: Progress = { running: true, done: 0, total: targets.length, failed: 0, skipped: 0, stopped: false, issues: [] };
+    cancel.current = false; setProgress({ ...status }); setBusy(`正在生成${label}…`); setError(''); setMessage(''); setDownloadLink(null); setEditing(false); setScratchDraft(null);
+    const files: ExportArchiveEntry[] = [], images: Array<{ path: string; status: string; [key: string]: unknown }> = [];
     const output = document.createElement('canvas'), context = output.getContext('2d');
+    let completed = 0;
     try {
       if (!context) throw new Error('无法创建图像画布。');
       for (let i = 0; i < targets.length; i++) {
+        if (cancel.current) { status.stopped = true; break; }
         const entry = targets[i], item = records[entry.key];
-        setBusy(`正在导出 ${i + 1} / ${targets.length}…`); await tick();
+        const image: { path: string; status: string; [key: string]: unknown } = { path: entry.path, status: 'failed' };
+        setBusy(`正在导出${label} ${i + 1} / ${targets.length}…`); await tick();
         try {
           const input = entry.key === activeKey && loaded ? loaded : await readEntry(entry);
-          if (input.hash !== item.sourceHash) throw new Error('源文件已改变，请重新分析。');
-          output.width = input.frame.width; output.height = input.frame.height; drawOverlay(context, input.frame, item);
+          image.sourceHash = input.hash; image.width = input.frame.width; image.height = input.frame.height; image.sourceWarnings = input.warnings;
+          if (!adjustedOnly && input.hash !== item.sourceHash) throw new Error('源文件已改变，请重新分析。');
+          const adjusted = normalizeBackground(input.frame, frozen, input.background), metadata = displayMetadata(frozen, adjusted);
+          image.display = metadata;
+          if (frozen.enabled && !adjusted.estimate.valid) throw new Error(adjusted.warnings.join('；') || '无法可靠估计背景。');
+          output.width = input.frame.width; output.height = input.frame.height; drawOverlay(context, adjusted.frame, adjustedOnly ? undefined : item);
           const blob = await new Promise<Blob>((resolve, reject) => output.toBlob(value => value ? resolve(value) : reject(new Error('PNG 编码失败')), 'image/png'));
           const directory = `${String(i + 1).padStart(4, '0')}_${safeFilePart(entry.path)}`;
-          files.push({ name: `${directory}/overlay.png`, data: new Uint8Array(await blob.arrayBuffer()) }, { name: `${directory}/analysis.json`, data: new TextEncoder().encode(JSON.stringify(item, null, 2)) });
-        } catch (cause) { issues.push(`${entry.path}：${cause instanceof Error ? cause.message : String(cause)}`); }
+          files.push({ name: `${directory}/${adjustedOnly ? 'adjusted' : 'overlay'}.png`, data: new Uint8Array(await blob.arrayBuffer()) }, { name: `${directory}/display.json`, data: new TextEncoder().encode(JSON.stringify({ path: entry.path, sourceHash: input.hash, width: input.frame.width, height: input.frame.height, ...metadata }, null, 2)) });
+          if (!adjustedOnly) files.push({ name: `${directory}/analysis.json`, data: new TextEncoder().encode(JSON.stringify(item, null, 2)) });
+          image.status = 'completed'; image.directory = directory; completed++;
+        } catch (cause) {
+          const reason = cause instanceof Error ? cause.message : String(cause);
+          image.error = reason; status.failed++; status.issues.push(`${entry.path}：${reason}`);
+        }
+        images.push(image); status.done++; setProgress({ ...status, issues: [...status.issues] });
       }
-      if (!files.length) throw new Error(`没有成功导出的图像。${issues.join('；')}`);
-      files.push({ name: 'results.csv', data: new TextEncoder().encode(makeMigrationCsv(mode, exportRows)) }, { name: 'manifest.json', data: new TextEncoder().encode(JSON.stringify({ mode, requested: targets.length, completed: files.length / 2, issues, exportedAt: new Date().toISOString() }, null, 2)) });
-      const zip = await createStoredZip(files); presentDownload(new Blob([zip], { type: 'application/zip' }), `${mode}_${issues.length ? '部分完成_' : ''}标记图.zip`); setMessage(`标记图已导出${issues.length ? `；失败 ${issues.length} 张。` : '。'}`);
+      status.stopped ||= cancel.current && status.done < status.total;
+      images.push(...targets.slice(status.done).map(entry => ({ path: entry.path, status: 'unprocessed' })));
+      if (!completed) throw new Error(`没有成功导出的${label}。${status.issues[0] || (status.stopped ? '已停止。' : '')}`);
+      if (!adjustedOnly) files.push({ name: 'results.csv', data: new TextEncoder().encode(makeMigrationCsv(mode, exportRows)) });
+      files.push({ name: 'manifest.json', data: new TextEncoder().encode(JSON.stringify({ mode, kind: adjustedOnly ? 'adjusted-images' : 'analysis-overlays', settings: frozen, displayOnly: true, analysisUsesRawPixels: true, requested: targets.length, completed, failed: status.failed, stopped: status.stopped, unprocessed: targets.length - status.done, images, issues: status.issues, exportedAt: new Date().toISOString() }, null, 2)) });
+      setBusy('正在打包 ZIP…'); await tick();
+      const zip = await createStoredZip(files); presentDownload(new Blob([zip], { type: 'application/zip' }), `${mode}_${completed < targets.length ? '部分完成_' : ''}${label}.zip`);
+      setMessage(`${label}已导出 ${completed}/${targets.length}${status.failed ? `；失败 ${status.failed} 张` : ''}${status.stopped ? '；已停止' : ''}。`);
     } catch (cause) { setError(cause instanceof Error ? cause.message : String(cause)); }
-    finally { output.width = 0; output.height = 0; setBusy(''); }
+    finally { status.running = false; setProgress({ ...status, issues: [...status.issues] }); output.width = 0; output.height = 0; setBusy(''); }
   }
   useEffect(() => () => { if (downloadLink) URL.revokeObjectURL(downloadLink.url); }, [downloadLink]);
   useEffect(() => {
     if (!loaded || !canvas.current) return;
     canvas.current.width = loaded.frame.width; canvas.current.height = loaded.frame.height;
     const shown = scratchDraft && record ? { ...record, scratch: { ...record.scratch, boundaries: scratchDraft } as ScratchResult } : record;
-    const context = canvas.current.getContext('2d'); if (context) drawOverlay(context, loaded.frame, overlay ? shown : undefined, editing && mode === 'scratch');
-  }, [loaded, record, overlay, editing, mode, scratchDraft]);
+    const context = canvas.current.getContext('2d'); if (context) drawOverlay(context, display?.frame ?? loaded.frame, overlay ? shown : undefined, editing && mode === 'scratch');
+  }, [loaded, display, record, overlay, editing, mode, scratchDraft]);
 
   const controls: Array<{ key: string; label: string; min: number; max: number; step?: number }> = mode === 'scratch'
     ? [{ key: 'textureThreshold', label: '纹理阈值', min: 0.1, max: 128, step: 0.1 }, { key: 'centerXPct', label: '划痕中心 (%)', min: 1, max: 99 }, { key: 'roiTopPct', label: 'ROI 上缘 (%)', min: 0, max: 99.9, step: 0.1 }, { key: 'roiBottomPct', label: 'ROI 下缘 (%)', min: 0.1, max: 100, step: 0.1 }, { key: 'windowRadius', label: '纹理窗口半径', min: 1, max: 100 }, { key: 'minGapWidth', label: '最小划痕宽 (px)', min: 1, max: 10000 }, { key: 'rowStep', label: '边界采样间隔', min: 1, max: 100 }]
@@ -304,17 +330,20 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
       <div className="migration-workspace"><aside className="migration-controls">
         {entries.length > 0 && <><select aria-label="图像列表" disabled={!!busy} value={activeKey} onChange={event => { const entry = entries.find(item => item.key === event.target.value); if (entry) void openImage(entry); }}>{entries.map(entry => <option key={entry.key} value={entry.key}>{records[entry.key]?.error || records[entry.key]?.lastRunError ? '失败 · ' : records[entry.key]?.reviewed ? '✓ ' : records[entry.key] ? '已算 · ' : ''}{entry.path}</option>)}</select><div className="migration-prev-next"><button disabled={!!busy || currentIndex <= 0} onClick={() => void openImage(entries[currentIndex - 1])}>←</button><span>{currentIndex + 1} / {entries.length}</span><button disabled={!!busy || currentIndex === entries.length - 1} onClick={() => void openImage(entries[currentIndex + 1])}>→</button></div></>}
         <div className="migration-basic-controls">{controls.slice(0, 2).map(control)}</div><details><summary>更多参数</summary><div className="migration-parameter-grid">{controls.slice(2).map(control)}</div>{mode === 'transwell' && <label className="check"><input type="checkbox" checked={(parameters as TranswellParameters).excludeEdge} disabled={!!busy} onChange={event => { setParameters(old => ({ ...old, excludeEdge: event.target.checked })); setEditing(false); }} />排除触边对象</label>}</details>
+        <details className="migration-background-settings"><summary>背景设置</summary><label>目标亮度<input type="number" min={160} max={250} defaultValue={backgroundSettings.target} disabled={!!busy} onBlur={event => { const value = Number(event.target.value); const target = event.target.value && Number.isFinite(value) ? Math.max(160, Math.min(250, value)) : backgroundSettings.target; event.target.value = String(target); updateBackground({ target }); }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }} /></label><label className="check"><input type="checkbox" checked={backgroundSettings.matchColor} disabled={!!busy} onChange={event => updateBackground({ matchColor: event.target.checked })} />同时统一色调</label><p>逐张估计背景，共用目标。仅调整显示与导出，分析仍用原图。</p></details>
         <button className="wide" disabled={!loaded || !!busy} onClick={() => void analyzeCurrent()}>重算此图</button><button className="primary wide" disabled={!entries.length || !!busy} onClick={() => void analyzeAll()}>一键分析全部</button>
         {progress?.running && <div className="migration-progress"><span>{progress.done} / {progress.total}</span><button onClick={() => { cancel.current = true; setMessage('当前图完成后停止。'); }}>停止</button></div>}
         <p className="migration-qc-note">自动结果请核对</p>
         {record && !record.error && <div className="migration-edit-controls"><button className={editing ? 'selected wide' : 'wide'} disabled={!!busy || stale} onClick={beginEditing}>{editing ? '完成修改' : mode === 'scratch' ? (record.scratch?.boundaries.length ? '编辑左右边界' : '手动画边界') : '添加 / 删除标记'}</button><button className="wide" disabled={!!busy || !record.manualEdited || stale} onClick={resetManual}>恢复自动结果</button><label className="check"><input type="checkbox" checked={record.reviewed} disabled={!!busy || stale || (mode === 'scratch' && !record.scratch?.valid)} onChange={event => updateRecord({ reviewed: event.target.checked })} />已复核</label>{mode === 'scratch' && parsed?.timeHours !== null && parsed?.timeHours !== 0 && closure?.baselinePath && <label className="check"><input type="checkbox" checked={!!record.pairConfirmed} disabled={!!busy || stale} onChange={event => updateRecord({ pairConfirmed: event.target.checked })} />与 0H 为同一视野</label>}</div>}
-        <div className="migration-downloads"><button disabled={!exportRows.length || !!busy} onClick={exportCsv}>全部结果 CSV</button><button disabled={!Object.values(records).some(item => !item.error) || !!busy} onClick={() => void exportOverlays()}>全部标记图 ZIP</button>{downloadLink && <a href={downloadLink.url} download={downloadLink.name}>下载文件</a>}</div>
+        <div className="migration-downloads"><button disabled={!exportRows.length || !!busy} onClick={exportCsv}>全部结果 CSV</button><button disabled={!Object.values(records).some(item => !item.error) || !!busy} onClick={() => void exportImages(false)}>全部标记图 ZIP</button><button className="background-export" disabled={!entries.length || !backgroundSettings.enabled || !!busy} onClick={() => void exportImages(true)}>全部调整图 ZIP</button>{downloadLink && <a href={downloadLink.url} download={downloadLink.name}>下载文件</a>}</div>
       </aside><section className="migration-stage-column">
-        <div className="migration-stage"><div className="migration-toolbar"><label className="check"><input type="checkbox" checked={overlay} onChange={event => setOverlay(event.target.checked)} />显示标记</label>{editing && <span>{mode === 'scratch' ? (scratchDraft ? '草稿：拖动边界后计算' : '拖动边界修正') : '点击添加；点中标记删除'}</span>}<select aria-label="缩放" value={zoom} onChange={event => setZoom(event.target.value)}><option value="fit">适应视野</option><option value="0.5">50%</option><option value="1">100%</option><option value="2">200%</option></select></div>
+        <div className="migration-stage"><div className="migration-toolbar"><label className="check"><input type="checkbox" checked={overlay} onChange={event => setOverlay(event.target.checked)} />显示标记</label><label className="check"><input type="checkbox" checked={backgroundSettings.enabled} disabled={!!busy} onChange={event => updateBackground({ enabled: event.target.checked })} />统一背景</label>{editing && <span>{mode === 'scratch' ? (scratchDraft ? '草稿：拖动边界后计算' : '拖动边界修正') : '点击添加；点中标记删除'}</span>}<select aria-label="缩放" value={zoom} onChange={event => setZoom(event.target.value)}><option value="fit">适应视野</option><option value="0.5">50%</option><option value="1">100%</option><option value="2">200%</option></select></div>
           <div className={`migration-canvas ${loaded ? '' : 'empty'}`} aria-busy={!!busy}>{loaded ? <canvas ref={canvas} style={zoom === 'fit' ? { width: '100%', height: 'auto' } : { width: loaded.frame.width * +zoom, height: loaded.frame.height * +zoom }} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={() => { dragging.current = null; }} onPointerCancel={() => { dragging.current = null; }} aria-label={mode === 'scratch' ? '划痕边界预览，可编辑左右边界' : '穿膜细胞标记预览，可添加或删除候选点'} /> : <div className="migration-empty"><div>{mode === 'scratch' ? 'Ⅱ' : '⠿'}</div><h2>选择图像开始</h2><p>支持 TIFF · PNG · JPEG</p></div>}{busy && <div className="migration-processing" role="status"><i />{busy}</div>}</div>
           <div className="migration-meta"><span>{active?.path || '图像保留在本机'}</span><span>{loaded ? `${loaded.frame.width} × ${loaded.frame.height} px` : ''}</span></div></div>
         {record?.lastRunError && <div className="migration-stale">本次处理失败，当前显示保留的人工结果。</div>}
-        {stale && <div className="migration-stale">参数已改变，当前显示保留的旧结果。点击「重算此图」更新。</div>}
+        {stale && <div className="migration-stale">参数或算法已改变，当前保留旧结果。点击「重算此图」更新。</div>}
+        {backgroundSettings.enabled && display && !display.estimate.valid && <div className="migration-stale" role="status">背景估计不可靠，当前保留原图。</div>}
+        {backgroundSettings.enabled && display && <details className="migration-warning"><summary>背景调整详情{display.warnings.length ? ` (${display.warnings.length})` : ''}</summary><p>估计 RGB：{display.estimate.rgb.join(' / ')} → 目标 {backgroundSettings.target}；增益 {display.gains.map(gain => gain.toFixed(2)).join(' / ')}；截断 {(display.clippedFraction * 100).toFixed(2)}%。</p>{display.warnings.length > 0 && <ul>{display.warnings.map((warning, i) => <li key={i}>{warning}</li>)}</ul>}</details>}
         {record && !record.error && <div className="migration-stats">{mode === 'scratch' ? <><article><span>伤口面积</span><strong>{numberText(record.areaPx)}</strong><small>px²</small></article><article><span>平均宽度</span><strong>{numberText(record.meanWidthPx, 1)}</strong><small>px</small></article><article><span>{record.pairConfirmed ? '闭合率' : '闭合率（待核对）'}</span><strong>{closure?.closurePct == null ? '—' : `${numberText(closure.closurePct, 1)}%`}</strong><small>{closure?.status}</small></article></> : <><article><span>自动估计数</span><strong>{record.autoCount}</strong></article><article><span>修正后计数</span><strong>{record.correctedCount}</strong></article><article><span>染色覆盖率</span><strong>{numberText(record.coveragePct, 1)}%</strong><small>大团块 {record.clusterCount ?? 0}</small></article></>}</div>}
         {record?.warnings.length ? <details className="migration-warning"><summary>质控提示 ({record.warnings.length})</summary><ul>{record.warnings.map((warning, i) => <li key={i}>{warning}</li>)}</ul></details> : null}
         {progress && !progress.running && progress.issues.length > 0 && <details className="migration-warning"><summary>批量处理明细 ({progress.issues.length})</summary><ul>{progress.issues.map((issue, i) => <li key={i}>{issue}</li>)}</ul></details>}

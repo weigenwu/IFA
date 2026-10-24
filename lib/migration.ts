@@ -21,6 +21,7 @@ export const DEFAULT_SCRATCH_PARAMETERS: ScratchParameters = {
   textureThreshold: 8, windowRadius: 8, roiTopPct: 5, roiBottomPct: 95,
   centerXPct: 50, minGapWidth: 30, rowStep: 8,
 };
+export const SCRATCH_ALGORITHM_VERSION = 'texture-lateral-components-v2';
 export const DEFAULT_TRANSWELL_PARAMETERS: TranswellParameters = {
   stainThreshold: 12, maxBrightness: 235, minArea: 80, peakDistance: 20,
   minPeakRadius: 4, clusterArea: 1200, excludeEdge: false,
@@ -61,7 +62,7 @@ export function measureScratch(boundaries: ScratchBoundary[], width: number, hei
   return { areaPx, meanWidthPx: areaPx / span, roiAreaPx: width * span, gapPct: areaPx / (width * span) * 100, valid: true, qc: [] };
 }
 
-/** Vertical central low-texture gap. No registration or time/group inference. */
+/** Vertical gap between laterally connected cell sheets. No registration or time/group inference. */
 export function analyzeScratch(frame: RGBAFrame, parameters: ScratchParameters): ScratchResult {
   frameValid(frame);
   const { width, height, data } = frame;
@@ -83,11 +84,11 @@ export function analyzeScratch(frame: RGBAFrame, parameters: ScratchParameters):
     }
   }
   const radius = parameters.windowRadius, center = width * parameters.centerXPct / 100;
-  const rows: Array<{ y: number; left: number; right: number } | null> = [], ys: number[] = [];
-  const texture = new Float64Array(width + 1), cells = new Uint8Array(width);
-  for (let y = top; ; y = Math.min(bottom, y + parameters.rowStep)) {
-    ys.push(y);
-    const sampleY = Math.min(height - 1, y), y0 = Math.max(0, sampleY - radius), y1 = Math.min(height, sampleY + radius + 1);
+  const texture = new Float64Array(width + 1), textured = new Uint8Array(width * height), support = new Uint8Array(textured.length);
+  // Use the full 2D field before sampling rows: an island can be wider than the
+  // texture window yet still be disconnected from both cell sheets.
+  for (let y = 0; y < height; y++) {
+    const y0 = Math.max(0, y - radius), y1 = Math.min(height, y + radius + 1);
     texture[0] = 0;
     for (let x = 0; x < width; x++) {
       const x0 = Math.max(0, x - radius), x1 = Math.min(width, x + radius + 1), n = (x1 - x0) * (y1 - y0);
@@ -98,20 +99,45 @@ export function analyzeScratch(frame: RGBAFrame, parameters: ScratchParameters):
     }
     for (let x = 0; x < width; x++) {
       const left = Math.max(0, x - radius), right = Math.min(width, x + radius + 1);
-      cells[x] = Number((texture[right] - texture[left]) / (right - left) > parameters.textureThreshold);
+      const value = (texture[right] - texture[left]) / (right - left), at = y * width + x;
+      textured[at] = Number(value > parameters.textureThreshold);
+      // Weak texture connects true edge patches through lower-contrast cells.
+      // It supports topology only: the reported edge still uses the user's
+      // full threshold, so weak background alone cannot become a cell front.
+      support[at] = Number(value > parameters.textureThreshold * 0.5);
     }
-    // Ignore brief textured interruptions such as free debris, not long fronts.
-    for (let x = 0; x < width;) {
-      if (!cells[x]) { x++; continue; }
-      const start = x; while (x < width && cells[x]) x++;
-      if (x - start <= radius * 2) cells.fill(0, start, x);
+  }
+  // A monolayer must have substantial vertical support in a lateral strip.
+  // Top/bottom contact alone does not make a central debris island a front.
+  // A component can touch both sides if a local cell bridge closes the gap;
+  // retain it, but such rows still require a measurable gap below.
+  const sheets = new Uint8Array(textured.length), sideWidth = Math.max(1, Math.ceil(width * 0.05));
+  const minSpan = Math.max(2, Math.ceil((bottom - top) * 0.25));
+  const minSheetArea = Math.max(2, Math.ceil(width * height * 0.002));
+  let ignoredIslands = 0;
+  components(support, width, height, (pixels, size) => {
+    let leftMin = height, leftMax = -1, rightMin = height, rightMax = -1;
+    for (let i = 0; i < size; i++) {
+      const at = pixels[i], x = at % width, y = Math.floor(at / width);
+      if (!textured[at]) continue;
+      if (x < sideWidth) { leftMin = Math.min(leftMin, y); leftMax = Math.max(leftMax, y); }
+      if (x >= width - sideWidth) { rightMin = Math.min(rightMin, y); rightMax = Math.max(rightMax, y); }
     }
+    const sides = size < minSheetArea ? 0 : Number(leftMax - leftMin + 1 >= minSpan) | (Number(rightMax - rightMin + 1 >= minSpan) << 1);
+    if (!sides) { ignoredIslands++; return; }
+    for (let i = 0; i < size; i++) if (textured[pixels[i]]) sheets[pixels[i]] = sides;
+  });
+  const rows: Array<ScratchBoundary | null> = [], ys: number[] = [];
+  for (let y = top; ; y = Math.min(bottom, y + parameters.rowStep)) {
+    ys.push(y);
+    const offset = Math.min(height - 1, y) * width;
     let candidate: ScratchBoundary | null = null, bestDistance = Infinity;
     for (let x = 0; x < width;) {
-      if (cells[x]) { x++; continue; }
-      const left = x; while (x < width && !cells[x]) x++;
+      if (sheets[offset + x]) { x++; continue; }
+      const left = x; while (x < width && !sheets[offset + x]) x++;
       const right = x, distance = center < left ? left - center : center > right ? center - right : 0;
       if (left === 0 || right === width || right - left < parameters.minGapWidth || distance > width * 0.25) continue;
+      if (!(sheets[offset + left - 1] & 1) || !(sheets[offset + right] & 2)) continue;
       if (distance < bestDistance || (distance === bestDistance && right - left > (candidate ? candidate.right - candidate.left : 0))) { candidate = { y, left, right }; bestDistance = distance; }
     }
     rows.push(candidate);
@@ -134,7 +160,8 @@ export function analyzeScratch(frame: RGBAFrame, parameters: ScratchParameters):
     return { y: row.y, left: median(neighbors.map(p => p.left)), right: median(neighbors.map(p => p.right)) };
   });
   const measurement = measureScratch(boundaries, width, height);
-  const qc = ['自动边界是低纹理间隙候选；游离细胞、光照与粗糙前缘会影响结果，请检查并编辑。', '仅测量像素面积和宽度；未推断分组、时间对应或物理标定。'];
+  const qc = ['自动边界来自与左右侧细胞层相连的二维纹理区域；已排除独立纹理岛，仍需检查弱纹理、贴近前缘的碎屑与真实细胞桥。', '仅测量像素面积和宽度；未推断分组、时间对应或物理标定。'];
+  if (ignoredIslands) qc.push(`已忽略 ${ignoredIslands} 个无足够侧边连接支持的纹理区域；该数量不是游离细胞计数。`);
   if (missing) qc.push(`${missing} 个缺失采样行已按相邻边界插值，需重点复核。`);
   return { ...measurement, boundaries, qc };
 }

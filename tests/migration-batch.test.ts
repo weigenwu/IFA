@@ -22,6 +22,7 @@ test('closure needs valid matched baseline and preserves negative values', () =>
   assert.equal(scratchClosure(later, [{ ...baseline, areaPx: null }]).closurePct, null);
   assert.equal(scratchClosure(later, [{ ...baseline, width: 500 }]).closurePct, null);
   assert.equal(scratchClosure(later, [{ ...baseline, paramsJson: '{}' }]).closurePct, null);
+  assert.equal(scratchClosure({ ...later, algorithmVersion: 'v2' }, [{ ...baseline, algorithmVersion: 'v1' }]).closurePct, null);
   assert.equal(scratchClosure({ ...later, pairConfirmed: true }, [baseline]).status, '同一视野已确认');
 });
 

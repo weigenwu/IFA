@@ -2,7 +2,7 @@
 
 新增入口：[EdU 分析与去杂色](https://weigenwu.github.io/IFA/edu/)。支持文件夹按视野导入、红色碎片显示清理、核候选与 EdU 阳性比例、人工复核及 CSV/JSON 导出；全部在浏览器本地处理。详见 [EdU 方法与使用边界](docs/EDU_METHOD.md)。
 
-新增入口：[细胞划痕](https://weigenwu.github.io/IFA/scratch/)与 [Transwell 穿膜细胞计数](https://weigenwu.github.io/IFA/transwell/)。支持文件夹批量计算、边界/计数点修正、全部结果 CSV 和标记图 ZIP；不自动分组。详见 [划痕与 Transwell 方法](docs/MIGRATION_METHOD.md)。
+新增入口：[细胞划痕](https://weigenwu.github.io/IFA/scratch/)与 [Transwell 穿膜细胞计数](https://weigenwu.github.io/IFA/transwell/)。支持文件夹批量计算、边界/计数点修正、全部结果 CSV 和标记图 ZIP；可统一背景亮度/色调并批量导出调整图，不自动分组。划痕使用二维细胞层连通判断，边界为细红线。详见 [划痕与 Transwell 方法](docs/MIGRATION_METHOD.md)。
 
 在浏览器本地运行的细胞图像分析工具。Olympus FV3000 OIR 和 TIFF 图像不会上传到服务器，也不需要账号登录。
 
