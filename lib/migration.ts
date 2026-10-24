@@ -18,7 +18,7 @@ export interface TranswellResult {
   stainedAreaPx: number; coveragePct: number; clusterCount: number; qc: string[];
 }
 export const DEFAULT_SCRATCH_PARAMETERS: ScratchParameters = {
-  textureThreshold: 8, windowRadius: 8, roiTopPct: 5, roiBottomPct: 95,
+  textureThreshold: 8, windowRadius: 8, roiTopPct: 0, roiBottomPct: 100,
   centerXPct: 50, minGapWidth: 30, rowStep: 8,
 };
 export const SCRATCH_ALGORITHM_VERSION = 'texture-lateral-components-v2';
@@ -130,6 +130,8 @@ export function analyzeScratch(frame: RGBAFrame, parameters: ScratchParameters):
   const rows: Array<ScratchBoundary | null> = [], ys: number[] = [];
   for (let y = top; ; y = Math.min(bottom, y + parameters.rowStep)) {
     ys.push(y);
+    // y = height denotes the lower pixel edge; detect it from the last real
+    // pixel row while retaining the full image height for area integration.
     const offset = Math.min(height - 1, y) * width;
     let candidate: ScratchBoundary | null = null, bestDistance = Infinity;
     for (let x = 0; x < width;) {

@@ -36,6 +36,30 @@ test('scratch detects a central low-texture gap, preserves raw pixels, and respe
   assert.deepEqual(input.data, raw);
 });
 
+test('default scratch ROI detects the image ends and measures the complete height, including a partial final row step', () => {
+  const input = frame(320, 203, 190);
+  for (let y = 0; y < input.height; y++) for (let x = 0; x < input.width; x++) {
+    const left = y < 32 ? 60 : y >= 171 ? 110 : 80;
+    if (x < left || x >= 240) {
+      const gray = (Math.floor(x / 3) + Math.floor(y / 3)) % 2 ? 110 : 230; pixel(input, x, y, [gray, gray, gray]);
+    }
+  }
+  const raw = input.data.slice(), result = analyzeScratch(input, DEFAULT_SCRATCH_PARAMETERS);
+  assert.equal(result.valid, true);
+  assert.equal(result.boundaries[0].y, 0);
+  assert.equal(result.boundaries.at(-1)!.y, input.height);
+  assert.equal(result.boundaries.at(-2)!.y, 200);
+  assert.equal(result.roiAreaPx, input.width * input.height);
+  assert.equal(result.areaPx, result.meanWidthPx! * input.height);
+  assert.deepEqual(measureScratch(result.boundaries, input.width, input.height).areaPx, result.areaPx);
+  const middle = result.boundaries.find(p => p.y === 96)!;
+  assert.ok(result.boundaries[0].left + 10 < middle.left);
+  assert.ok(result.boundaries.at(-1)!.left > middle.left + 10);
+  assert.ok(!result.qc.some(message => message.includes('插值')), 'end rows must be detected, not filled from an interior trace');
+  assert.ok(result.boundaries.every(p => p.y >= 0 && p.y <= input.height && p.left >= 0 && p.right <= input.width));
+  assert.deepEqual(input.data, raw);
+});
+
 test('empty or unidentifiable scratch is not falsely reported as complete closure', () => {
   const input = frame();
   const empty = analyzeScratch(input, DEFAULT_SCRATCH_PARAMETERS);
