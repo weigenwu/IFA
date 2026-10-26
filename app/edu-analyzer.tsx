@@ -6,6 +6,7 @@ import { loadImages, type LoadedImage } from '../lib/image';
 import type { EduParameters, EduResult } from '../lib/edu';
 import { createStoredZip, safeFilePart, type ExportArchiveEntry } from '../lib/export-archive';
 import { resolveBatchChannels, nativeEduParameters, batchRecordAction, cleanupWorkerRequest, cleanupBatchSummary, type CleanupParameters } from '../lib/edu-batch';
+import { findWhiteRuler, restoreWhiteRuler, type WhiteRulerOverlay } from '../lib/edu-display';
 import './edu.css';
 
 type Field = { id: string; name: string; group: string; files: File[] };
@@ -158,6 +159,7 @@ export default function EduAnalyzer() {
   const snapshotOrdinals = useRef(new Map<string, number>());
   const nucleus = image?.channels[nucleusIndex], edu = image?.channels[eduIndex];
   const preservedGreen = image ? greenFor(image, [nucleusIndex, eduIndex]) : undefined;
+  const preservedRuler = useMemo(() => image ? findWhiteRuler(image) : null, [image]);
   const currentId = isDemo ? 'synthetic-demo' : fields[index]?.id;
   const displayKey = image && currentId ? `${image.hash}\n${currentId}` : null;
   const snapshotCount = Object.keys(displaySnapshots).length;
@@ -322,21 +324,23 @@ export default function EduAnalyzer() {
     if (!image || !nucleus || !edu || !currentId) return null;
     return { image, id: currentId, group, files: fields[index]?.files.map(file => file.webkitRelativePath || file.name) ?? image.sourceFiles, indices: [nucleusIndex, eduIndex], synthetic: isDemo, cleanup: cleanupParameters() };
   }
-  function displaySettings(source = currentDisplaySource()) {
+  function displaySettings(source = currentDisplaySource(), ruler?: WhiteRulerOverlay | null) {
     if (!source) throw new Error('请先选择图像。');
     const { image: input, indices, cleanup: settings } = source;
     const blue = input.channels[indices[0]], red = input.channels[indices[1]];
+    const whiteRuler = ruler === undefined ? findWhiteRuler(input) : ruler;
     const key = `${input.hash}\n${source.id}`;
     let ordinal = snapshotOrdinals.current.get(key);
     if (!ordinal) { ordinal = snapshotOrdinals.current.size + 1; snapshotOrdinals.current.set(key, ordinal); }
     const stem = `${String(ordinal).padStart(4, '0')}_${source.synthetic ? 'DEMO_' : ''}${safeFilePart(source.id.split(/[\\/]/).pop() || source.id)}`;
-    return { schema: 'fluoroscope-edu-display-v3', settingsFile: `_metadata/${stem}.settings.json`, timestamp: new Date().toISOString(), field: source.id, group: source.group, purpose: 'Display derivative only, not for quantitative analysis', sourceFiles: source.files, sourceHash: input.hash, hashKind: input.sourceFiles.length > 1 ? 'SHA256 of newline-joined individual SHA256 hashes in input order' : 'SHA256 of original file', synthetic: source.synthetic, dimensions: [input.width, input.height], channels: { nucleus: blue.label, edu: red.label }, display: { redFloor: settings.redFloor, blueFloor: settings.blueFloor, redFloorNative: settings.redFloor / 255 * red.maxValue, blueFloorNative: settings.blueFloor / 255 * blue.maxValue, thresholdUiScale: '0..255 normalized to channel full scale', redMinArea: settings.redMinArea, blueMinArea: settings.blueMinArea, protectNuclear: settings.protectNuclear, onlyNuclear: settings.onlyNuclear, nucleusSupportThreshold: settings.nucleusThreshold, nucleusSupportThresholdNative: settings.nucleusThreshold / 255 * blue.maxValue, nucleusSupportMinArea: settings.nucleusMinArea, nucleusFullScale: blue.maxValue, eduFullScale: red.maxValue, exports: DISPLAY_CHANNELS.map(channel => `${stem}_${channel}.png`), greenPreservedInMerge: Boolean(greenFor(input, indices)), outputBitDepth: 8 }, warnings: input.warnings };
+    return { schema: 'fluoroscope-edu-display-v3', settingsFile: `_metadata/${stem}.settings.json`, timestamp: new Date().toISOString(), field: source.id, group: source.group, purpose: 'Display derivative only, not for quantitative analysis', sourceFiles: source.files, sourceHash: input.hash, hashKind: input.sourceFiles.length > 1 ? 'SHA256 of newline-joined individual SHA256 hashes in input order' : 'SHA256 of original file', synthetic: source.synthetic, dimensions: [input.width, input.height], channels: { nucleus: blue.label, edu: red.label }, display: { redFloor: settings.redFloor, blueFloor: settings.blueFloor, redFloorNative: settings.redFloor / 255 * red.maxValue, blueFloorNative: settings.blueFloor / 255 * blue.maxValue, thresholdUiScale: '0..255 normalized to channel full scale', redMinArea: settings.redMinArea, blueMinArea: settings.blueMinArea, protectNuclear: settings.protectNuclear, onlyNuclear: settings.onlyNuclear, nucleusSupportThreshold: settings.nucleusThreshold, nucleusSupportThresholdNative: settings.nucleusThreshold / 255 * blue.maxValue, nucleusSupportMinArea: settings.nucleusMinArea, nucleusFullScale: blue.maxValue, eduFullScale: red.maxValue, exports: DISPLAY_CHANNELS.map(channel => `${stem}_${channel}.png`), greenPreservedInMerge: Boolean(greenFor(input, indices)), whiteRuler: { preserved: Boolean(whiteRuler), pixels: whiteRuler?.indices.length ?? 0, bounds: whiteRuler?.bounds ?? null, sourceRgb: whiteRuler?.sourceRgb ?? null, method: 'source-rgb-corner-v1' }, outputBitDepth: 8 }, warnings: input.warnings };
   }
   async function captureDisplay(source = currentDisplaySource(), pixelsData = cleaned, progressPrefix = '正在保存'): Promise<DisplaySnapshot> {
     if (!source || !pixelsData) throw new Error('请先生成去碎片预览。');
     const { image: input, indices } = source;
     const blue = input.channels[indices[0]], red = input.channels[indices[1]], green = greenFor(input, indices);
-    const key = `${input.hash}\n${source.id}`, settings = displaySettings(source);
+    const ruler = findWhiteRuler(input);
+    const key = `${input.hash}\n${source.id}`, settings = displaySettings(source, ruler);
     const imageFiles = settings.display.exports, settingsFile = settings.settingsFile;
     const output = document.createElement('canvas'); output.width = input.width; output.height = input.height;
     const context = output.getContext('2d'); if (!context) throw new Error('浏览器无法生成导出图像。');
@@ -352,6 +356,7 @@ export default function EduAnalyzer() {
           pixels.data[at + 2] = panel === 1 ? 0 : pixelsData.nucleus[i] / blue.maxValue * 255;
           pixels.data[at + 3] = 255;
         }
+        restoreWhiteRuler(pixels.data, ruler);
         context.putImageData(pixels, 0, 0);
         const blob = await new Promise<Blob>((resolve, reject) => output.toBlob(value => value ? resolve(value) : reject(new Error(`${DISPLAY_CHANNELS[panel]} PNG 编码失败，请重试。`)), 'image/png'));
         entries.push({ name: imageFiles[panel], data: new Uint8Array(await blob.arrayBuffer()) });
@@ -488,6 +493,7 @@ export default function EduAnalyzer() {
           const state = classification[label]; pixels.data[at] = state === 1 ? 255 : state === 3 ? 150 : 40; pixels.data[at + 1] = state === 1 ? 211 : state === 3 ? 150 : 240; pixels.data[at + 2] = state === 1 ? 40 : state === 3 ? 150 : 205;
         }
       }
+      restoreWhiteRuler(pixels.data, preservedRuler);
       context.putImageData(pixels, 0, 0);
       if (!merge || view !== 'mask') return;
       if (exclusion.enabled) {
@@ -499,7 +505,7 @@ export default function EduAnalyzer() {
         for (const cell of result.nuclei) { context.fillStyle = cell.id === selected ? '#ffffff' : '#fff9'; context.fillText(String(cell.id), cell.x, cell.y); }
       }
     });
-  }, [image, nucleus, edu, preservedGreen, view, cleaned, result, revisions, selected, exclusion]);
+  }, [image, nucleus, edu, preservedGreen, preservedRuler, view, cleaned, result, revisions, selected, exclusion]);
   const selectedCell = result?.nuclei.find(cell => cell.id === selected);
   const fieldLabel = isDemo ? '合成演示' : `${index + 1} / ${fields.length}`;
   return <div className="edu-app edu-compact edu-three">
