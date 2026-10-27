@@ -1,0 +1,1 @@
+import{t as e}from"./basedecoder-Bbjq6hV6.js";var t=class extends e{decodeBlock(e){return e}};export{t as default};
