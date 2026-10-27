@@ -5,6 +5,7 @@ import Analyzer from '../app/analyzer';
 import IntensityAnalyzer from '../app/intensity-analyzer';
 import EduAnalyzer from '../app/edu-analyzer';
 import MigrationAnalyzer from '../app/migration-analyzer';
+import Cck8Analyzer from '../app/cck8-analyzer';
 import '../app/globals.css';
 import Home from '../app/page';
 
@@ -19,6 +20,8 @@ const page = path.endsWith('/colocalization')
     ? <EduAnalyzer />
   : path.endsWith('/intensity')
     ? <IntensityAnalyzer />
+  : path.endsWith('/cck8')
+    ? <Cck8Analyzer />
     : <Home />;
 
 createRoot(document.getElementById('root')!).render(
