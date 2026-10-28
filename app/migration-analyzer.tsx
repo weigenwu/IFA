@@ -7,19 +7,20 @@ import { DEFAULT_SCRATCH_PARAMETERS, DEFAULT_TRANSWELL_PARAMETERS, SCRATCH_ALGOR
 import { makeMigrationCsv, scratchClosure, parseScratchFile, type MigrationCsvRow } from '../lib/migration-batch';
 import { DEFAULT_BACKGROUND_SETTINGS, estimateBackground, normalizeBackground, type BackgroundEstimate, type BackgroundSettings } from '../lib/brightfield-display';
 import { moveScratchBoundary, traceScratchSegment, type ScratchSide, type TracePoint } from '../lib/scratch-edit';
+import { scratchDisplayEdges, type ScratchLineType } from '../lib/scratch-display';
 import './migration.css';
 
 type Mode = 'scratch' | 'transwell';
 type Parameters = ScratchParameters | TranswellParameters;
 type Entry = { key: string; path: string; file: File };
 type Point = { x: number; y: number };
-type LineStyle = { color: string; widthPx: number };
+type LineStyle = { color: string; widthPx: number; type: ScratchLineType };
 type ResultRecord = MigrationCsvRow & { key: string; scratch?: ScratchResult; autoScratch?: ScratchResult; points?: Point[]; autoPoints?: Point[]; updatedAt: string; lastRunError?: string };
 type Loaded = { frame: RGBAFrame; hash: string; warnings: string[]; background: BackgroundEstimate };
 type Progress = { running: boolean; done: number; total: number; failed: number; skipped: number; stopped: boolean; issues: string[] };
 type ScratchStroke = { key: string; hash: string; paramsJson: string; pointerId: number; side: ScratchSide; mode: 'trace' | 'move'; radiusPx: number; start: TracePoint; centerY: number; last: TracePoint; base: ScratchBoundary[]; boundaries: ScratchBoundary[]; before: ResultRecord; beforeDraft: ScratchBoundary[] | null; moved: boolean };
 const SUPPORTED = /\.(png|jpe?g|tiff?|bmp|webp)$/i;
-const DEFAULT_LINE_STYLE: LineStyle = { color: '#e88d89', widthPx: 2 };
+const DEFAULT_LINE_STYLE: LineStyle = { color: '#e88d89', widthPx: 2, type: 'contour' };
 const tick = () => new Promise<void>(resolve => setTimeout(resolve, 0));
 const numberText = (value: number | null | undefined, digits = 0) => value == null || !Number.isFinite(value) ? '—' : value.toLocaleString('en-US', { maximumFractionDigits: digits });
 
@@ -86,7 +87,7 @@ function drawOverlay(context: CanvasRenderingContext2D, frame: RGBAFrame, lineSt
   if (!record || record.error) return;
   const width = Math.max(2, frame.width / 600);
   if (record.scratch?.boundaries.length) {
-    const edges = record.scratch.boundaries;
+    const edges = scratchDisplayEdges(record.scratch.boundaries, lineStyle.type, frame.width);
     context.lineWidth = lineStyle.widthPx; context.strokeStyle = lineStyle.color;
     for (const side of ['left', 'right'] as const) { context.beginPath(); edges.forEach((edge, i) => i ? context.lineTo(edge[side], edge.y) : context.moveTo(edge[side], edge.y)); context.stroke(); }
     if (anchors) for (const i of anchorIndices(edges)) for (const side of ['left', 'right'] as const) { context.beginPath(); context.arc(edges[i][side], edges[i].y, width * 3, 0, Math.PI * 2); context.fillStyle = '#fff'; context.fill(); context.strokeStyle = lineStyle.color; context.stroke(); }
@@ -96,7 +97,7 @@ function drawOverlay(context: CanvasRenderingContext2D, frame: RGBAFrame, lineSt
   }
 }
 function displayMetadata(settings: BackgroundSettings, result: ReturnType<typeof normalizeBackground>, lineStyle?: LineStyle) {
-  return { settings, estimate: result.estimate, gains: result.gains, clippedFraction: result.clippedFraction, warnings: result.warnings, displayOnly: true, analysisUsesRawPixels: true, ...(lineStyle ? { lineStyle } : {}) };
+  return { settings, estimate: result.estimate, gains: result.gains, clippedFraction: result.clippedFraction, warnings: result.warnings, displayOnly: true, analysisUsesRawPixels: true, ...(lineStyle ? { lineStyle, measurementBoundary: 'actual-contour' } : {}) };
 }
 
 export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
@@ -362,7 +363,8 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
     if (!loaded || !canvas.current) return;
     canvas.current.width = loaded.frame.width; canvas.current.height = loaded.frame.height;
     const shown = scratchDraft && record ? { ...record, scratch: { ...record.scratch, boundaries: scratchDraft } as ScratchResult } : record;
-    const context = canvas.current.getContext('2d'); if (context) drawOverlay(context, display?.frame ?? loaded.frame, lineStyle, overlay ? shown : undefined, editing && mode === 'scratch' && editMode === 'move');
+    const previewStyle = editing ? { ...lineStyle, type: 'contour' as const } : lineStyle;
+    const context = canvas.current.getContext('2d'); if (context) drawOverlay(context, display?.frame ?? loaded.frame, previewStyle, overlay ? shown : undefined, editing && mode === 'scratch' && editMode === 'move');
   }, [loaded, display, lineStyle, record, overlay, editing, mode, editMode, scratchDraft]);
 
   const controls: Array<{ key: string; label: string; min: number; max: number; step?: number }> = mode === 'scratch'
@@ -379,6 +381,8 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
         <div className="migration-basic-controls">{controls.slice(0, 2).map(control)}</div><details><summary>更多参数</summary><div className="migration-parameter-grid">{controls.slice(2).map(control)}</div>{mode === 'transwell' && <label className="check"><input type="checkbox" checked={(parameters as TranswellParameters).excludeEdge} disabled={!!busy} onChange={event => { endEditing(true); setParameters(old => ({ ...old, excludeEdge: event.target.checked })); }} />排除触边对象</label>}</details>
         <details className="migration-background-settings"><summary>背景设置</summary><label>目标亮度<input type="number" min={160} max={250} defaultValue={backgroundSettings.target} disabled={!!busy} onBlur={event => { const value = Number(event.target.value); const target = event.target.value && Number.isFinite(value) ? Math.max(160, Math.min(250, value)) : backgroundSettings.target; event.target.value = String(target); updateBackground({ target }); }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }} /></label><label className="check"><input type="checkbox" checked={backgroundSettings.matchColor} disabled={!!busy} onChange={event => updateBackground({ matchColor: event.target.checked })} />同时统一色调</label><p>逐张估计背景，共用目标。仅调整显示与导出，分析仍用原图。</p></details>
         {mode === 'scratch' && <details><summary>边界设置</summary>
+          <label>线条类型<select aria-label="边界线条类型" value={lineStyle.type} disabled={!!busy || editing} onChange={event => updateLineStyle({ type: event.target.value as ScratchLineType })}><option value="contour">贴合细胞</option><option value="straight">直线</option></select></label>
+          <p className="migration-line-note">仅调整显示与导出，测量仍用实际边界。</p>
           <label>颜色<span className="migration-line-color"><input type="color" aria-label="边界颜色" value={lineStyle.color} disabled={!!busy} onChange={event => updateLineStyle({ color: event.target.value })} /><input key={lineStyle.color} type="text" aria-label="边界颜色 HEX" defaultValue={lineStyle.color} maxLength={7} spellCheck={false} disabled={!!busy} onBlur={event => { const color = /^#[0-9a-f]{6}$/i.test(event.target.value) ? event.target.value.toLowerCase() : lineStyle.color; event.target.value = color; updateLineStyle({ color }); }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }} /></span></label>
           <label>粗细（原图 px）<input type="number" min={0.5} max={12} step={0.5} defaultValue={lineStyle.widthPx} disabled={!!busy} onBlur={event => { const value = Number(event.target.value); const widthPx = event.target.value && Number.isFinite(value) ? Math.round(Math.max(0.5, Math.min(12, value)) * 2) / 2 : lineStyle.widthPx; event.target.value = String(widthPx); updateLineStyle({ widthPx }); }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }} /></label>
         </details>}
@@ -387,6 +391,7 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
         <p className="migration-qc-note">自动结果请核对</p>
         {record && !record.error && <div className="migration-edit-controls">
           <button className={editing ? 'selected wide' : 'wide'} disabled={!!busy || stale} onClick={beginEditing}>{editing ? '完成修改' : mode === 'scratch' ? (record.scratch?.boundaries.length ? '编辑左右边界' : '手动画边界') : '添加 / 删除标记'}</button>
+          {editing && mode === 'scratch' && lineStyle.type === 'straight' && <p className="migration-line-note">编辑时显示实际轮廓，完成后恢复直线。</p>}
           {mode === 'scratch' && editing && <div className="migration-scratch-tools"><div className="migration-edit-modes" aria-label="边界编辑模式">
             <button className={editMode === 'trace' ? 'selected' : ''} aria-pressed={editMode === 'trace'} disabled={!!busy || stale} onClick={() => { cancelScratchStroke(); setEditMode('trace'); }}>沿边描画</button>
             <button className={editMode === 'move' ? 'selected' : ''} aria-pressed={editMode === 'move'} disabled={!!busy || stale} onClick={() => { cancelScratchStroke(); setEditMode('move'); }}>局部拖动</button>

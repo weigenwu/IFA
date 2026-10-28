@@ -12,6 +12,7 @@
 .migration-downloads .background-export { flex-basis:100%; }
 .migration-toolbar label.check { white-space:nowrap; }
 .migration-line-color { display:flex; gap:7px; margin-top:5px; }
+.migration-line-note { width:100%; margin:8px 0; font-size:11px; color:#819681; line-height:1.7; }
 .migration-line-color input { min-width:0; height:34px; border:1px solid #d7e3da; border-radius:6px; background:#fbfdfb; }
 .migration-line-color input[type=color] { width:42px; padding:3px; flex-shrink:0; cursor:pointer; }
 .migration-line-color input[type=text] { width:100%; padding:7px; color:#3b6451; font-size:12px; }
