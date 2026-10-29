@@ -101,9 +101,12 @@ const microns = (value: string | null, unit: string | null) => {
   return ['µm', 'um', 'micrometer', 'micrometre'].includes(normalized) ? number : null;
 };
 
+// TIFF ASCII tags retain their NUL terminator in GeoTIFF; XML rejects that padding.
+export const normalizeTiffDescription = (description: string) => description.replace(/\0+$/, '');
+
 function parseOmeMetadata(description: string): OmeMetadata | null {
   if (!description.includes('<OME')) return null;
-  const xml = new DOMParser().parseFromString(description, 'application/xml');
+  const xml = new DOMParser().parseFromString(normalizeTiffDescription(description), 'application/xml');
   if (xml.getElementsByTagName('parsererror').length) return null;
   const pixels = xml.getElementsByTagNameNS('*', 'Pixels')[0];
   if (!pixels) return null;

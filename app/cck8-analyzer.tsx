@@ -138,7 +138,7 @@ export default function Cck8Analyzer() {
   const chartHeight = 65 + plots.length * 45;
 
   return <div className="cck8-app">
-    <header className="cck8-header"><a className="cck8-brand" href="../">✳ <span>FluoroScope</span></a><nav aria-label="分析工具"><a href="../intensity/">荧光</a><a href="../edu/">EdU</a><a href="../scratch/">划痕</a><a href="../transwell/">Transwell</a><a href="../cck8/" aria-current="page">CCK-8</a></nav><small>数据仅在本地处理</small></header>
+    <header className="cck8-header"><a className="cck8-brand" href="../">✳ <span>FluoroScope</span></a><nav aria-label="分析工具"><a href="../intensity/">荧光</a><a href="../edu/">EdU</a><a href="../scratch/">划痕</a><a href="../transwell/">Transwell</a><a href="../cck8/" aria-current="page">CCK-8</a><a href="../if-count/">切片计数</a></nav><small>数据仅在本地处理</small></header>
     <main className="cck8-main">
       <div className="cck8-heading"><div><span className="cck8-eyebrow">CELL VIABILITY</span><h1>CCK-8 数据分析</h1></div><div className="cck8-actions"><button disabled={!data || stale || busy} onClick={() => { if (data) void exportFile('CCK8_汇总.csv', 'text/csv;charset=utf-8', new Blob([summaryCsv(data)], { type: 'text/csv;charset=utf-8' })); }}>导出 CSV</button><button disabled={!data || stale || busy} onClick={exportAll}>完整数据 ZIP</button></div></div>
       {error && <div role="alert" className="cck8-alert">{error}</div>}
