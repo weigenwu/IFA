@@ -2,7 +2,8 @@
 
 import { useEffect, useRef, useState, type PointerEvent } from 'react';
 import { loadImages, type LoadedImage } from '../lib/image';
-import { summarizeIf, type Point, type Region, type Parameters, type Result, type Cell } from '../lib/if-count';
+import { summarizeIf, pointInPolygon, type Point, type Region, type Parameters, type Result, type Cell } from '../lib/if-count';
+import { ellipseControls, smoothContour, moveContour, contourBounds, resizeContour } from '../lib/if-region-editor';
 import { groupIfFiles, inferIfChannels, resolveIfChannels, captureIfChannelReference, mapIfChannels, csv } from '../lib/if-count-io';
 import { createStoredZip, safeFilePart, type ExportArchiveEntry } from '../lib/export-archive';
 import './if-count.css';
@@ -10,11 +11,17 @@ import './if-count.css';
 type Mapping = { nucleus: string; a: string; b: string };
 type Snapshot = { hash: string; width: number; height: number; displayOnly: boolean; format: string; sourceWarnings: string[]; channels: string[]; parameters: Parameters; createdAt: string };
 type Field = { id: string; name: string; files: File[]; regions: Region[]; mapping?: Mapping; result?: Result; snapshot?: Snapshot; reviewed: boolean; error?: string };
+type Outline = { points: Point[]; controls: Point[] | null };
+type Gesture = { kind: 'ellipse' | 'handle' | 'move' | 'resize' | 'freehand'; start: Point; before: Outline; index: number };
 const defaults: Parameters = { nucleusThreshold: 55, aThreshold: 40, bThreshold: 40, minArea: 35, maxArea: 3000, median: true, excludeEdge: false, radius: 6, minPositiveFraction: 0.04 };
 const colors = ['#ffd16a', '#62e2dd', '#ff9c72', '#aeabff', '#8ce3a4'];
 const emptyMapping: Mapping = { nucleus: '', a: '', b: '' };
 const messageOf = (error: unknown) => error instanceof Error ? error.message : String(error);
 const n = (value: number | null) => value === null ? '—' : Number.isInteger(value) ? String(value) : value.toFixed(1);
+const corners = (points: Point[]): Point[] => {
+  const { left, top, right, bottom } = contourBounds(points);
+  return [{ x: left, y: top }, { x: right, y: top }, { x: right, y: bottom }, { x: left, y: bottom }];
+};
 
 function workerAnalysis(image: LoadedImage, mapping: Mapping, parameters: Parameters, regions: Region[]): Promise<Result> {
   const [nucleus, a, b] = resolveIfChannels(image, mapping);
@@ -113,6 +120,10 @@ export default function IfCountAnalyzer() {
   const [rgbAllowed, setRgbAllowed] = useState(false);
   const [draw, setDraw] = useState(false);
   const [draft, setDraft] = useState<Point[]>([]);
+  const [drawMode, setDrawMode] = useState<'ellipse' | 'freehand'>('ellipse');
+  const [controls, setControls] = useState<Point[] | null>(null);
+  const [editingId, setEditingId] = useState<string>();
+  const [history, setHistory] = useState<Outline[]>([]);
   const [regionName, setRegionName] = useState('神经束内 1');
   const [regionKind, setRegionKind] = useState<'region' | 'tissue'>('region');
   const [selectedCell, setSelectedCell] = useState<number>();
@@ -122,7 +133,7 @@ export default function IfCountAnalyzer() {
   const [download, setDownload] = useState<{ url: string; name: string } | null>(null);
   const fileInput = useRef<HTMLInputElement>(null), folderInput = useRef<HTMLInputElement>(null), channelsInput = useRef<HTMLInputElement>(null);
   const canvas = useRef<HTMLCanvasElement>(null), base = useRef<HTMLCanvasElement | null>(null);
-  const stop = useRef(false), pointerDown = useRef(false), draftRef = useRef<Point[]>([]), loadSequence = useRef(0);
+  const stop = useRef(false), draftRef = useRef<Point[]>([]), controlsRef = useRef<Point[] | null>(null), gesture = useRef<Gesture | null>(null), loadSequence = useRef(0);
   const active = fields.find(f => f.id === activeId);
   const image = loaded?.id === activeId ? loaded.image : null;
   const mapping = active?.mapping ?? emptyMapping;
@@ -138,13 +149,42 @@ export default function IfCountAnalyzer() {
     if (!c || !image || !original || !active) return;
     c.width = image.width; c.height = image.height;
     const ctx = c.getContext('2d')!; ctx.drawImage(original, 0, 0);
-    overlay(ctx, active, image.width, selectedCell, showCells);
+    overlay(ctx, { ...active, regions: active.regions.filter(r => r.id !== editingId) }, image.width, selectedCell, showCells);
     if (draft.length) {
+      const unit = image.width / (c.getBoundingClientRect().width || image.width);
+      const handles = controls ?? (editingId ? draft : []);
       ctx.beginPath(); draft.forEach((p, i) => i ? ctx.lineTo(p.x, p.y) : ctx.moveTo(p.x, p.y));
-      ctx.strokeStyle = '#fff'; ctx.lineWidth = Math.max(2, image.width / 700); ctx.stroke();
-      for (const p of [draft[0], draft[draft.length - 1]]) { ctx.beginPath(); ctx.arc(p.x, p.y, Math.max(3, image.width / 250), 0, Math.PI * 2); ctx.fillStyle = '#fff'; ctx.fill(); }
+      if (handles.length) ctx.closePath();
+      ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5 * unit; ctx.stroke();
+      if (handles.length) {
+        const bounds = contourBounds(handles);
+        ctx.setLineDash([4 * unit, 4 * unit]); ctx.strokeStyle = '#ffffff65'; ctx.lineWidth = unit;
+        ctx.strokeRect(bounds.left, bounds.top, bounds.right - bounds.left, bounds.bottom - bounds.top); ctx.setLineDash([]);
+        ctx.fillStyle = '#fff';
+        for (const p of corners(handles)) ctx.fillRect(p.x - 4 * unit, p.y - 4 * unit, 8 * unit, 8 * unit);
+      }
+      for (const p of handles.length ? handles : [draft[0], draft[draft.length - 1]]) {
+        ctx.beginPath(); ctx.arc(p.x, p.y, 4 * unit, 0, Math.PI * 2); ctx.fillStyle = '#fff'; ctx.fill(); ctx.strokeStyle = '#1b8067'; ctx.lineWidth = unit; ctx.stroke();
+      }
     }
-  }, [image, mapping, active, draft, selectedCell, showCells, displayContrast]);
+  }, [image, mapping, active, draft, controls, editingId, selectedCell, showCells, displayContrast, zoom]);
+
+  function setOutline(outline: Outline) {
+    draftRef.current = outline.points; controlsRef.current = outline.controls;
+    setDraft(outline.points); setControls(outline.controls);
+  }
+
+  function cancelRegion() {
+    setDraw(false); setEditingId(undefined); setHistory([]); gesture.current = null;
+    setOutline({ points: [], controls: null }); setError('');
+    setRegionName(`神经束内 ${(active?.regions.filter(r => r.kind === 'region').length ?? 0) + 1}`); setRegionKind('region');
+  }
+
+  function beginRegion(mode: 'ellipse' | 'freehand', region?: Region) {
+    setDrawMode(mode); setDraw(true); setEditingId(region?.id); setHistory([]); setSelectedCell(undefined); setError(''); setDownload(null); gesture.current = null;
+    setOutline({ points: region?.points ?? [], controls: region?.controlPoints ?? null });
+    if (region) { setRegionName(region.name); setRegionKind(region.kind); }
+  }
 
   function updateField(id: string, patch: Partial<Field>) {
     setDownload(null);
@@ -153,7 +193,8 @@ export default function IfCountAnalyzer() {
 
   async function selectField(field: Field) {
     const sequence = ++loadSequence.current;
-    setActiveId(field.id); setLoaded(null); setSelectedCell(undefined); setDraw(false); setDraft([]); draftRef.current = [];
+    setActiveId(field.id); setLoaded(null); setSelectedCell(undefined); cancelRegion();
+    setRegionName(`神经束内 ${field.regions.filter(r => r.kind === 'region').length + 1}`);
     setLoading(true); setError('');
     try {
       const data = await loadImages(field.files);
@@ -216,12 +257,16 @@ export default function IfCountAnalyzer() {
   function finishRegion() {
     if (!active || !image || draftRef.current.length < 3) return;
     const points = draftRef.current;
-    const regions = [...active.regions, { id: crypto.randomUUID(), name: regionName.trim() || '区域', kind: regionKind, points }];
+    const region: Region = { id: editingId ?? crypto.randomUUID(), name: regionName.trim() || '区域', kind: regionKind, points, ...(controlsRef.current ? { controlPoints: controlsRef.current } : {}) };
+    const regions = editingId ? active.regions.map(r => r.id === editingId ? region : r) : [...active.regions, region];
+    if (editingId && JSON.stringify(active.regions.find(r => r.id === editingId)?.points) === JSON.stringify(points)) {
+      cancelRegion(); setStatus('轮廓未改变，原有结果已保留。'); return;
+    }
     try {
       // Geometry validation is shared with measurement, including self-intersections.
       summarizeIf([], regions, image.width, image.height);
       updateField(active.id, { regions, result: undefined, snapshot: undefined, reviewed: false, error: undefined });
-      setDraw(false); setDraft([]); draftRef.current = [];
+      cancelRegion();
       setRegionName(`神经束内 ${regions.filter(r => r.kind === 'region').length + 1}`); setRegionKind('region');
       setStatus('区域已保存，请重新计算此图。');
     } catch (problem) { setError(messageOf(problem)); }
@@ -233,11 +278,23 @@ export default function IfCountAnalyzer() {
   }
 
   function startPointer(event: PointerEvent<HTMLCanvasElement>) {
-    if (busy || !image) return;
+    if (busy || !image || event.button !== 0 || gesture.current) return;
     const p = point(event);
     if (draw) {
-      event.currentTarget.setPointerCapture(event.pointerId); pointerDown.current = true;
-      draftRef.current = [...draftRef.current, p]; setDraft(draftRef.current);
+      const before = { points: draftRef.current, controls: controlsRef.current };
+      const handles = before.controls ?? (editingId ? before.points : []);
+      const hit = 10 * image.width / event.currentTarget.getBoundingClientRect().width;
+      let kind: Gesture['kind'], index = -1;
+      if (handles.length) {
+        const targets = [...handles.map((v, i) => ({ p: v, index: i, kind: 'handle' as const })), ...corners(handles).map((v, i) => ({ p: v, index: i, kind: 'resize' as const }))];
+        const nearest = targets.map(v => ({ ...v, distance: Math.hypot(v.p.x - p.x, v.p.y - p.y) })).sort((a, b) => a.distance - b.distance)[0];
+        if (nearest.distance <= hit) { kind = nearest.kind; index = nearest.index; }
+        else if (pointInPolygon(p, before.points)) kind = 'move';
+        else return;
+      } else kind = drawMode === 'ellipse' ? 'ellipse' : 'freehand';
+      event.currentTarget.setPointerCapture(event.pointerId);
+      gesture.current = { kind, start: p, before, index }; setError('');
+      if (kind === 'freehand') setOutline({ points: [...before.points, p], controls: null });
     } else if (active?.result) {
       let best: Cell | undefined, distance = Infinity;
       for (const c of active.result.cells) { const d = Math.hypot(p.x - c.x, p.y - c.y); if (d < distance) { distance = d; best = c; } }
@@ -246,11 +303,38 @@ export default function IfCountAnalyzer() {
   }
 
   function movePointer(event: PointerEvent<HTMLCanvasElement>) {
-    if (!draw || !pointerDown.current || busy) return;
-    const p = point(event), last = draftRef.current[draftRef.current.length - 1];
-    if (!last || Math.hypot(p.x - last.x, p.y - last.y) > Math.max(3, (image?.width ?? 1000) / 250)) {
-      draftRef.current = [...draftRef.current, p]; setDraft(draftRef.current);
+    if (!draw || !gesture.current || busy || !image) return;
+    const p = point(event), g = gesture.current;
+    if (g.kind === 'freehand') {
+      const last = draftRef.current[draftRef.current.length - 1];
+      if (!last || Math.hypot(p.x - last.x, p.y - last.y) > 3 * image.width / event.currentTarget.getBoundingClientRect().width) setOutline({ points: [...draftRef.current, p], controls: null });
+      return;
     }
+    const before = g.before.controls ?? g.before.points;
+    const handles = g.kind === 'ellipse' ? ellipseControls(g.start, p)
+      : g.kind === 'move' ? moveContour(before, p.x - g.start.x, p.y - g.start.y, image.width, image.height)
+      : g.kind === 'resize' ? resizeContour(before, g.index as 0 | 1 | 2 | 3, p, image.width, image.height)
+      : before.map((v, i) => i === g.index ? p : v);
+    const smooth = g.kind === 'ellipse' || g.before.controls !== null;
+    setOutline({ points: smooth ? smoothContour(handles, image.width, image.height) : handles, controls: smooth ? handles : null });
+  }
+
+  function endPointer(event: PointerEvent<HTMLCanvasElement>, cancelled = false) {
+    const g = gesture.current;
+    if (!g) return;
+    if (cancelled) setOutline(g.before);
+    else {
+      movePointer(event);
+      if (g.kind === 'ellipse' && (Math.abs(point(event).x - g.start.x) < 3 || Math.abs(point(event).y - g.start.y) < 3)) setOutline(g.before);
+      else if (JSON.stringify(g.before.points) !== JSON.stringify(draftRef.current)) setHistory(old => [...old.slice(-29), g.before]);
+    }
+    gesture.current = null;
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) event.currentTarget.releasePointerCapture(event.pointerId);
+  }
+
+  function undoRegion() {
+    const previous = history[history.length - 1];
+    if (previous) { setOutline(previous); setHistory(history.slice(0, -1)); setError(''); }
   }
 
   function editCell(patch: Partial<Cell>) {
@@ -295,26 +379,26 @@ export default function IfCountAnalyzer() {
   return <div className="if-app">
     <header className="if-header"><a className="if-brand" href="../">✳ <strong>FluoroScope</strong></a><nav aria-label="分析工具"><a href="../intensity/">荧光</a><a href="../edu/">EdU</a><a href="../scratch/">划痕</a><a href="../transwell/">Transwell</a><a href="../cck8/">CCK-8</a><a aria-current="page" href="../if-count/">切片计数</a></nav><small>图像仅在本地处理</small></header>
     <main className="if-main">
-      <div className="if-heading"><div><small>SPATIAL CELL COUNT</small><h1>免疫荧光切片计数</h1></div><div className="if-actions"><button disabled={!completed.length || busy} onClick={() => offer('切片计数_区域汇总.csv', new Blob([summaryCsv(completed)], { type: 'text/csv;charset=utf-8' }))}>汇总 CSV · {completed.length}</button><button disabled={!completed.length || busy} onClick={() => void exportAll()}>全部结果 ZIP</button></div></div>
+      <div className="if-heading"><div><small>SPATIAL CELL COUNT</small><h1>免疫荧光切片计数</h1></div><div className="if-actions"><button disabled={!completed.length || busy || draw} onClick={() => offer('切片计数_区域汇总.csv', new Blob([summaryCsv(completed)], { type: 'text/csv;charset=utf-8' }))}>汇总 CSV · {completed.length}</button><button disabled={!completed.length || busy || draw} onClick={() => void exportAll()}>全部结果 ZIP</button></div></div>
       {error && <div className="if-alert" role="alert">{error}</div>}
       <div className="if-layout">
         <aside className="if-sidebar">
-          <section className="if-card"><h2>切片</h2><div className="if-actions"><button disabled={busy || loading} onClick={() => fileInput.current?.click()}>选择图像</button><button disabled={busy || loading} onClick={() => folderInput.current?.click()}>选择文件夹</button></div>
+          <section className="if-card"><h2>切片</h2><div className="if-actions"><button disabled={busy || loading || draw} onClick={() => fileInput.current?.click()}>选择图像</button><button disabled={busy || loading || draw} onClick={() => folderInput.current?.click()}>选择文件夹</button></div>
             <input ref={fileInput} type="file" hidden multiple accept=".tif,.tiff,.oir,.png,.jpg,.jpeg" onChange={e => { void importFiles(e.target.files); e.target.value = ''; }} />
             <input ref={folderInput} type="file" hidden multiple {...{ webkitdirectory: '' }} onChange={e => { void importFiles(e.target.files); e.target.value = ''; }} />
             <input ref={channelsInput} type="file" hidden multiple accept=".tif,.tiff,.png,.jpg,.jpeg" onChange={e => { void importFiles(e.target.files, true); e.target.value = ''; }} />
-            <button className="if-text" disabled={busy || loading} onClick={() => channelsInput.current?.click()}>组合单通道文件</button>
-            <div className="if-files">{fields.map((f, i) => <button key={f.id} aria-pressed={f.id === activeId} disabled={busy || loading} title={f.name} onClick={() => void selectField(f)}><span>{i + 1}. {f.name}</span><small>{f.error ? '失败' : f.reviewed ? '已复核' : f.result ? '待复核' : '未计算'}</small></button>)}</div>
+            <button className="if-text" disabled={busy || loading || draw} onClick={() => channelsInput.current?.click()}>组合单通道文件</button>
+            <div className="if-files">{fields.map((f, i) => <button key={f.id} aria-pressed={f.id === activeId} disabled={busy || loading || draw} title={f.name} onClick={() => void selectField(f)}><span>{i + 1}. {f.name}</span><small>{f.error ? '失败' : f.reviewed ? '已复核' : f.result ? '待复核' : '未计算'}</small></button>)}</div>
             <div className="if-actions"><button className="primary" disabled={!image || busy || loading || draw} onClick={() => void run(false)}>计算此图</button><button disabled={!image || busy || loading || draw} onClick={() => void run(true)}>计算全部</button>{running && <button onClick={() => { stop.current = true; setStatus('将在当前切片完成后停止'); }}>停止</button>}</div>
             <p className="if-hint" role="status">{status || '先圈区域，再统计细胞。未圈区域时统计全图。'}</p>
             {active?.error && <p className="if-error">{active.error}{active.result ? '（上次成功结果仍保留，导出会注明本次失败）' : ''}</p>}
             {download && <a className="if-download" href={download.url} download={download.name}>下载文件 · {download.name}</a>}
           </section>
-          <section className="if-card"><h2>区域</h2><div className="if-regions">{active?.regions.map((r, i) => <div key={r.id}><i style={{ background: colors[i % colors.length] }} /><input aria-label={`区域名称 ${i + 1}`} value={r.name} disabled={busy || draw} onChange={e => { const regions = active.regions.map(v => v.id === r.id ? { ...v, name: e.target.value } : v); updateField(active.id, { regions, result: undefined, snapshot: undefined, reviewed: false }); }} /><button aria-label={`删除区域 ${i + 1}`} disabled={busy || draw} onClick={() => updateField(active.id, { regions: active.regions.filter(v => v.id !== r.id), result: undefined, snapshot: undefined, reviewed: false })}>×</button></div>)}</div>
+          <section className="if-card"><h2>区域</h2><div className="if-regions">{active?.regions.map((r, i) => <div key={r.id}><i style={{ background: colors[i % colors.length] }} /><input aria-label={`区域名称 ${i + 1}`} value={r.name} disabled={busy || draw} onChange={e => { const regions = active.regions.map(v => v.id === r.id ? { ...v, name: e.target.value } : v); updateField(active.id, { regions, result: undefined, snapshot: undefined, reviewed: false }); }} /><button aria-label={`调整区域 ${i + 1}`} disabled={busy || draw || !image} onClick={() => beginRegion(r.controlPoints ? 'ellipse' : 'freehand', r)}>调整</button><button aria-label={`删除区域 ${i + 1}`} disabled={busy || draw} onClick={() => updateField(active.id, { regions: active.regions.filter(v => v.id !== r.id), result: undefined, snapshot: undefined, reviewed: false })}>×</button></div>)}</div>
             <label>区域名称<input aria-label="新区域名称" value={regionName} disabled={busy || draw} onChange={e => setRegionName(e.target.value)} /></label>
             <label>区域类型<select aria-label="区域类型" value={regionKind} disabled={busy || draw} onChange={e => { setRegionKind(e.target.value as 'region' | 'tissue'); setRegionName(e.target.value === 'tissue' ? '束外组织（外膜候选）' : `神经束内 ${(active?.regions.filter(r => r.kind === 'region').length ?? 0) + 1}`); }}><option value="region">单独统计区域</option><option value="tissue">组织外轮廓（扣除内部区域）</option></select></label>
-            <div className="if-actions">{!draw ? <button disabled={!image || busy || loading} onClick={() => { setDraw(true); setDraft([]); draftRef.current = []; setSelectedCell(undefined); }}>描画区域</button> : <><button disabled={draft.length < 3} onClick={finishRegion}>完成描边</button><button onClick={() => { draftRef.current = draftRef.current.slice(0, -1); setDraft(draftRef.current); }}>撤回一点</button><button onClick={() => { setDraw(false); setDraft([]); draftRef.current = []; }}>取消</button></>}</div>
-            <p className="if-hint">{draw ? '按住拖动描边，或沿边缘逐点点击，最后点完成。' : '可圈多个神经束。外轮廓减去内部区域，得到束外组织。'}</p>
+            <div className="if-actions">{!draw ? <><button className="primary" disabled={!image || busy || loading} onClick={() => beginRegion('ellipse')}>画椭圆</button><button disabled={!image || busy || loading} onClick={() => beginRegion('freehand')}>自由描边</button></> : <><button className="primary" disabled={draft.length < 3} onClick={finishRegion}>保存区域</button><button disabled={!history.length} onClick={undoRegion}>撤销</button><button onClick={cancelRegion}>取消</button></>}</div>
+            <p className="if-hint">{draw ? controls?.length || editingId ? '圆点改形，方点缩放，圈内拖动。保存后重新计算。' : drawMode === 'ellipse' ? '按住拖出椭圆，再拖动边界微调。' : '按住拖动描边，或沿边缘逐点点击。' : '可圈多个神经束，点“调整”修改轮廓。'}</p>
           </section>
           <details className="if-card" open={!fields.length}><summary>通道与计数参数</summary><fieldset disabled={busy || loading || draw}>
             {(['nucleus', 'a', 'b'] as const).map((key, i) => <label key={key}>{['DAPI · 蓝', 'AF647 · 紫', 'GFP · 绿'][i]}<select aria-label={['DAPI 通道', 'AF647 通道', 'GFP 通道'][i]} value={mapping[key]} onChange={e => { if (active) updateField(active.id, { mapping: { ...mapping, [key]: e.target.value }, result: undefined, snapshot: undefined, reviewed: false }); }}><option value="">选择通道</option>{image?.channels.map(c => <option key={c.id} value={c.id}>{c.label}</option>)}</select></label>)}
@@ -328,11 +412,11 @@ export default function IfCountAnalyzer() {
         </aside>
         <section className="if-results">
           <div className="if-card if-view"><div className="if-viewbar"><strong>{loading ? '读取中…' : active?.name ?? '图像预览'}</strong>{image && !image.displayOnly && <label className="if-check" title="仅改变预览和标记图亮度，计数使用原始信号"><input type="checkbox" disabled={busy} checked={displayContrast} onChange={e => { setDisplayContrast(e.target.checked); setDownload(null); }} />增强显示</label>}<label className="if-check"><input type="checkbox" checked={showCells} onChange={e => setShowCells(e.target.checked)} />细胞标记</label><label className="if-zoom">缩放<select aria-label="预览缩放" value={zoom} onChange={e => setZoom(Number(e.target.value))}><option value="100">适应</option><option value="150">150%</option><option value="250">250%</option><option value="400">400%</option></select></label></div>
-            {image ? <div className="if-canvas-scroll"><canvas aria-label="切片图像与区域描边" ref={canvas} style={{ width: zoom === 100 ? 'auto' : `${zoom}%`, maxWidth: zoom === 100 ? '100%' : 'none', maxHeight: zoom === 100 ? 'min(65vh, 650px)' : 'none', margin: '0 auto', cursor: draw ? 'crosshair' : 'pointer' }} onPointerDown={startPointer} onPointerMove={movePointer} onPointerUp={() => { pointerDown.current = false; }} onPointerCancel={() => { pointerDown.current = false; }} /></div> : <div className="if-empty"><span>◉</span><h3>按区域，数清每一种细胞</h3><p>DAPI · AF647 · GFP</p></div>}
+            {image ? <div className="if-canvas-scroll"><canvas aria-label="切片图像与区域描边" ref={canvas} style={{ width: zoom === 100 ? 'auto' : `${zoom}%`, maxWidth: zoom === 100 ? '100%' : 'none', maxHeight: zoom === 100 ? 'min(65vh, 650px)' : 'none', margin: '0 auto', cursor: draw ? 'crosshair' : 'pointer' }} onPointerDown={startPointer} onPointerMove={movePointer} onPointerUp={event => endPointer(event)} onPointerCancel={event => endPointer(event, true)} onLostPointerCapture={event => endPointer(event, true)} /></div> : <div className="if-empty"><span>◉</span><h3>按区域，数清每一种细胞</h3><p>DAPI · AF647 · GFP</p></div>}
             {image && <div className="if-legend"><span>● DAPI 核</span><span>● AF647 阳性</span><span>● GFP 阳性</span><span>● 双阳性</span>{image.displayOnly && <em>RGB 估算</em>}</div>}
           </div>
           {cell && <div className="if-card if-cell"><strong>细胞 #{cell.id}</strong><span>{cell.regionName} · 核面积 {cell.area} px²</span><label className="if-check"><input type="checkbox" disabled={busy} checked={cell.aPositive} onChange={e => editCell({ aPositive: e.target.checked })} />AF647+</label><label className="if-check"><input type="checkbox" disabled={busy} checked={cell.bPositive} onChange={e => editCell({ bPositive: e.target.checked })} />GFP+</label><label className="if-check"><input type="checkbox" disabled={busy} checked={cell.excluded} onChange={e => editCell({ excluded: e.target.checked })} />排除</label></div>}
-          <div className="if-card if-summary"><div className="if-section-head"><h2>分区结果</h2>{active?.result && <label className="if-check"><input type="checkbox" disabled={busy} checked={active.reviewed} onChange={e => updateField(active.id, { reviewed: e.target.checked })} />已人工复核</label>}</div>
+          <div className="if-card if-summary"><div className="if-section-head"><h2>分区结果</h2>{active?.result && <label className="if-check"><input type="checkbox" disabled={busy || draw} checked={active.reviewed} onChange={e => updateField(active.id, { reviewed: e.target.checked })} />已人工复核</label>}</div>
             <div className="if-table"><table><thead><tr><th>区域</th><th>总核数</th><th>AF647+</th><th>GFP+</th><th>双阳性</th><th>双阳性 / AF647+</th></tr></thead><tbody>{active?.result?.regions.map(r => <tr key={r.id}><td>{r.name}</td><td>{r.total}</td><td>{r.aPositive}</td><td>{r.bPositive}</td><td>{r.doublePositive}</td><td>{n(r.doubleOfAPct)}{r.doubleOfAPct === null ? '' : '%'}</td></tr>)}</tbody></table></div>
             <p className="if-hint">{active?.result ? '点击图中细胞可修正阳性或排除；双阳性指同一核关联区域内两种标记均阳性。' : '完成描边后点“计算此图”，或统一参数计算全部。'}</p>
             {active?.result?.regions.some(r => r.total >= 10 && (r.aPositive / r.total > .95 || r.bPositive / r.total > .95)) && <p className="if-error">有区域接近全阳性，请结合阴性对照核对背景与阈值。</p>}

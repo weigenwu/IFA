@@ -2,7 +2,7 @@ import type { NumericArray } from './analysis';
 import { analyzeEdu } from './edu.ts';
 
 export interface Point { x: number; y: number }
-export interface Region { id: string; name: string; kind: 'tissue' | 'region'; points: Point[] }
+export interface Region { id: string; name: string; kind: 'tissue' | 'region'; points: Point[]; controlPoints?: Point[] }
 export interface Parameters {
   nucleusThreshold: number; aThreshold: number; bThreshold: number;
   minArea: number; maxArea: number; median: boolean; excludeEdge: boolean;
