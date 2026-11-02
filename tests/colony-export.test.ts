@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { colonyCsv, colonySummary, prismTsv, type ColonyExportRow } from '../lib/colony-export.ts';
+import { colonyCsv, colonyGroupNames, colonySummary, prismTsv, type ColonyExportRow } from '../lib/colony-export.ts';
 
 const well = (patch: Partial<ColonyExportRow> = {}): ColonyExportRow => ({
   file: 'plate.jpg', group: 'A', replicate: '1', included: true, count: 4, autoCount: 4,
@@ -43,4 +43,17 @@ test('summary uses per-well sample SD and one-well groups have missing SD', () =
   assert.deepEqual(colonySummary(rows), [{ group: 'A', n: 3, mean: 4, sd: 2 }, { group: 'B', n: 1, mean: 0, sd: null }]);
   const exported = colonyCsv([well({ count: 5, autoCount: 4, manual: true, reviewed: true })]);
   assert.ok(exported.includes('"5","4","true","true","1","已复核","true"'));
+});
+
+test('explicit three-group order is shared by names, Prism and summary; unlisted groups append in first-appearance order', () => {
+  const rows = [well({ group: 'B', count: 1 }), well({ group: 'C', count: 2 }), well({ group: ' A ', count: 3 }),
+    well({ group: 'D', count: 4 }), well({ group: 'E', count: 5 }), well({ group: 'B', count: 6 })];
+  const order = ['C', 'A', 'B', 'C', 'missing'];
+  const before = structuredClone({ rows, order });
+  assert.deepEqual(colonyGroupNames(rows, order), ['C', 'A', 'B', 'D', 'E']);
+  assert.deepEqual(colonySummary(rows, order).map(({ group, n }) => [group, n]), [['C', 1], ['A', 1], ['B', 2], ['D', 1], ['E', 1]]);
+  assert.equal(prismTsv(rows, order), 'C\tA\tB\tD\tE\r\n2\t3\t1\t4\t5\r\n\t\t6\t\t');
+  assert.deepEqual(colonyGroupNames(rows), ['B', 'C', 'A', 'D', 'E']);
+  assert.deepEqual(colonyGroupNames([{ group: 'CIC+' }, { group: 'CIC−' }, { group: 'CIC-' }]), ['CIC+', 'CIC−', 'CIC-']);
+  assert.deepEqual({ rows, order }, before);
 });

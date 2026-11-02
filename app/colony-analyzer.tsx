@@ -3,14 +3,16 @@
 import { useEffect, useRef, useState, type PointerEvent } from 'react';
 import { loadImages } from '../lib/image';
 import { DEFAULT_COLONY_PARAMETERS, type ColonyCircle, type ColonyParameters, type ColonyPoint, type ColonyResult } from '../lib/colony';
-import { colonyCsv, prismTsv, colonySummary, type ColonyExportRow } from '../lib/colony-export';
+import { colonyCsv, colonyGroupNames, prismTsv, colonySummary, type ColonyExportRow } from '../lib/colony-export';
+import { estimateColonyBackground, recolorColonyBackground } from '../lib/colony-display';
 import { createStoredZip, safeFilePart, type ExportArchiveEntry } from '../lib/export-archive';
 import type { RGBAFrame } from '../lib/migration';
 import './if-count.css';
 import './colony.css';
 
 type Photo = { canvas: HTMLCanvasElement; frame: RGBAFrame; hash: string };
-type Well = { id: string; file: File; path: string; group: string; replicate: string; included: boolean; show: boolean; width: number; height: number; hash: string; roi: ColonyCircle; confirmed: boolean; thumb?: string; result?: ColonyResult; points?: ColonyPoint[]; parameters?: ColonyParameters; reviewed: boolean; manual: boolean; error?: string; createdAt?: string };
+type Well = { id: string; file: File; path: string; group: string; replicate: string; included: boolean; show: boolean; width: number; height: number; hash: string; roi: ColonyCircle; confirmed: boolean; preview?: string; thumb?: string; displayBackground?: [number, number, number]; result?: ColonyResult; points?: ColonyPoint[]; parameters?: ColonyParameters; reviewed: boolean; manual: boolean; error?: string; createdAt?: string };
+type DisplaySettings = { canvas: string; recolor: boolean; well: string };
 const msg = (e: unknown) => e instanceof Error ? e.message : String(e);
 const tick = () => new Promise<void>(resolve => setTimeout(resolve, 0));
 const circle = (w: number, h: number): ColonyCircle => ({ cx: w / 2, cy: h / 2, r: Math.min(w, h) * .42 });
@@ -42,11 +44,22 @@ async function readPhoto(file: File): Promise<Photo> {
   for (let i = 3; i < data.length; i += 4) if (data[i] !== 255) throw new Error('请使用不透明的原始平板照片。');
   return { canvas, frame: { width: canvas.width, height: canvas.height, data }, hash };
 }
-function cropped(source: HTMLCanvasElement, roi: ColonyCircle, size: number) {
+function thumbnail(source: HTMLCanvasElement) {
+  const c = document.createElement('canvas'), scale = 240 / Math.max(source.width, source.height);
+  c.width = Math.round(source.width * scale); c.height = Math.round(source.height * scale);
+  c.getContext('2d')!.drawImage(source, 0, 0, c.width, c.height); return c.toDataURL('image/jpeg', .85);
+}
+function cropped(source: CanvasImageSource, roi: ColonyCircle, size: number, display: DisplaySettings = { canvas: '#ffffff', recolor: false, well: '#ffffff' }, background?: [number, number, number]) {
   const c = document.createElement('canvas'); c.width = c.height = size;
-  const ctx = c.getContext('2d')!; ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, size, size);
+  const ctx = c.getContext('2d')!; ctx.fillStyle = display.canvas; ctx.fillRect(0, 0, size, size);
   ctx.save(); ctx.beginPath(); ctx.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2); ctx.clip();
-  ctx.drawImage(source, roi.cx - roi.r, roi.cy - roi.r, roi.r * 2, roi.r * 2, 0, 0, size, size); ctx.restore(); return c;
+  ctx.drawImage(source, roi.cx - roi.r, roi.cy - roi.r, roi.r * 2, roi.r * 2, 0, 0, size, size); ctx.restore();
+  if (display.recolor) {
+    const pixels = ctx.getImageData(0, 0, size, size);
+    const adjusted = recolorColonyBackground({ width: size, height: size, data: pixels.data }, { cx: size / 2, cy: size / 2, r: size / 2 }, display.well, background);
+    pixels.data.set(adjusted.data); ctx.putImageData(pixels, 0, 0);
+  }
+  return c;
 }
 function countPhoto(photo: Photo, roi: ColonyCircle, parameters: ColonyParameters): Promise<ColonyResult> {
   return new Promise((resolve, reject) => {
@@ -59,28 +72,31 @@ function countPhoto(photo: Photo, roi: ColonyCircle, parameters: ColonyParameter
 function dataRows(wells: Well[]): ColonyExportRow[] {
   return wells.map(w => ({ file: w.path, group: w.group.trim(), replicate: w.replicate, included: w.included, count: w.points?.length ?? null, autoCount: w.result?.points.length ?? null, reviewed: w.reviewed, manual: w.manual, coveragePct: w.result?.coveragePct ?? null, error: w.error ?? '', hash: w.hash, roi: JSON.stringify(w.roi), parameters: w.parameters ? JSON.stringify(w.parameters) : '', createdAt: w.createdAt ?? '' }));
 }
-function groupsFor(wells: Well[]) {
+function groupsFor(wells: Well[], order: string[] = []) {
   const groups = new Map<string, Well[]>();
-  for (const w of wells) if (w.included && w.group.trim()) {
+  for (const w of wells) if (w.group.trim()) {
     if (!groups.has(w.group.trim())) groups.set(w.group.trim(), []);
     if (w.show && w.confirmed) groups.get(w.group.trim())!.push(w);
   }
-  return [...groups].filter(([, entries]) => entries.length);
+  return colonyGroupNames(wells, order).map(group => [group, groups.get(group)!] as [string, Well[]]).filter(([, entries]) => entries.length);
 }
-async function montage(wells: Well[], title: string, size: number, originals: boolean) {
-  const groups = groupsFor(wells); if (!groups.length) throw new Error('先确认圈选、填写组别，并勾选要排版的孔。');
-  const rows = Math.max(...groups.map(([, entries]) => entries.length)), gap = Math.round(size * .12), top = title ? 110 : 65;
+async function montage(wells: Well[], title: string, size: number, originals: boolean, order: string[], display: DisplaySettings) {
+  const groups = groupsFor(wells, order); if (!groups.length) throw new Error('先确认圈选、填写组别，并勾选要展示的图片。');
+  const rows = Math.max(...groups.map(([, entries]) => entries.length)), unit = size / 320, gap = Math.round(size * .12), top = (title ? 110 : 65) * unit;
   const canvas = document.createElement('canvas'); canvas.width = groups.length * (size + gap) + gap; canvas.height = top + rows * (size + gap);
   if (canvas.width * canvas.height > 40_000_000 || canvas.width > 16000 || canvas.height > 16000) throw new Error('排版过大，请减少本次展示的孔。');
-  const ctx = canvas.getContext('2d')!; ctx.fillStyle = '#fff'; ctx.fillRect(0, 0, canvas.width, canvas.height); ctx.fillStyle = '#111'; ctx.textAlign = 'center';
-  if (title) { ctx.font = 'bold 32px Arial, Microsoft YaHei'; ctx.fillText(title, canvas.width / 2, 38, canvas.width - gap * 2); ctx.strokeStyle = '#333'; ctx.lineWidth = 2; ctx.beginPath(); ctx.moveTo(gap, 52); ctx.lineTo(canvas.width - gap, 52); ctx.stroke(); }
+  const ctx = canvas.getContext('2d')!; ctx.fillStyle = display.canvas; ctx.fillRect(0, 0, canvas.width, canvas.height);
+  const rgb = display.canvas.slice(1).match(/../g)!.map(v => parseInt(v, 16));
+  const ink = rgb[0] * .299 + rgb[1] * .587 + rgb[2] * .114 < 128 ? '#ffffff' : '#111111';
+  ctx.fillStyle = ink; ctx.textAlign = 'center';
+  if (title) { ctx.font = `bold ${32 * unit}px Arial, Microsoft YaHei`; ctx.fillText(title, canvas.width / 2, 38 * unit, canvas.width - gap * 2); ctx.strokeStyle = ink; ctx.lineWidth = 2 * unit; ctx.beginPath(); ctx.moveTo(gap, 52 * unit); ctx.lineTo(canvas.width - gap, 52 * unit); ctx.stroke(); }
   for (let col = 0; col < groups.length; col++) {
     const [group, entries] = groups[col]; const x = gap + col * (size + gap);
-    ctx.font = 'bold 26px Arial, Microsoft YaHei'; ctx.fillStyle = '#111'; ctx.fillText(group, x + size / 2, top - 18, size);
+    ctx.font = `bold ${26 * unit}px Arial, Microsoft YaHei`; ctx.fillStyle = ink; ctx.fillText(group, x + size / 2, top - 18 * unit, size);
     for (let row = 0; row < entries.length; row++) {
       const w = entries[row];
-      if (originals) { const photo = await readPhoto(w.file); if (photo.hash !== w.hash) throw new Error('源图校验不一致'); ctx.drawImage(cropped(photo.canvas, w.roi, size), x, top + row * (size + gap)); }
-      else { const im = new Image(); im.src = w.thumb!; await im.decode(); ctx.drawImage(im, x, top + row * (size + gap), size, size); }
+      if (originals) { const photo = await readPhoto(w.file); if (photo.hash !== w.hash) throw new Error('源图校验不一致'); ctx.drawImage(cropped(photo.canvas, w.roi, size, display, w.displayBackground), x, top + row * (size + gap)); }
+      else { const im = new Image(); im.src = w.thumb!; await im.decode(); ctx.drawImage(cropped(im, { cx: 160, cy: 160, r: 160 }, size, display, w.displayBackground), x, top + row * (size + gap)); }
     }
   }
   return canvas;
@@ -95,12 +111,14 @@ export default function ColonyAnalyzer() {
   const [busy, setBusy] = useState(false), [running, setRunning] = useState(false), [status, setStatus] = useState(''), [error, setError] = useState('');
   const [showMarks, setShowMarks] = useState(true), [layoutError, setLayoutError] = useState('');
   const [zoom, setZoom] = useState(100);
+  const [groupOrder, setGroupOrder] = useState<string[]>([]);
+  const [display, setDisplay] = useState<DisplaySettings>({ canvas: '#ffffff', recolor: false, well: '#ffffff' });
   const [download, setDownload] = useState<{ url: string; name: string } | null>(null);
   const [undo, setUndo] = useState<Record<string, ColonyPoint[][]>>({});
-  const input = useRef<HTMLInputElement>(null), folder = useRef<HTMLInputElement>(null), canvas = useRef<HTMLCanvasElement>(null), layout = useRef<HTMLCanvasElement>(null), prism = useRef<HTMLTextAreaElement>(null);
+  const input = useRef<HTMLInputElement>(null), folder = useRef<HTMLInputElement>(null), canvas = useRef<HTMLCanvasElement>(null), layout = useRef<HTMLCanvasElement>(null), prism = useRef<HTMLTextAreaElement>(null), editor = useRef<HTMLDivElement>(null), picker = useRef<HTMLElement>(null);
   const stop = useRef(false), sequence = useRef(0), drag = useRef<{ start: { x: number; y: number }; roi: ColonyCircle; resize: boolean } | null>(null);
   const active = wells.find(w => w.id === activeId), loaded = photo?.id === activeId ? photo.value : null;
-  const rows = dataRows(wells), tsv = prismTsv(rows), summary = colonySummary(rows);
+  const rows = dataRows(wells), tsv = prismTsv(rows, groupOrder), summary = colonySummary(rows, groupOrder), groupNames = colonyGroupNames(wells, groupOrder);
   useEffect(() => () => { if (download) URL.revokeObjectURL(download.url); }, [download]);
   useEffect(() => {
     if (!canvas.current || !active || !loaded) return;
@@ -115,13 +133,19 @@ export default function ColonyAnalyzer() {
   useEffect(() => {
     let cancelled = false;
     if (!groupsFor(wells).length) { if (layout.current) { layout.current.width = 1; layout.current.height = 1; } return; }
-    void montage(wells, title, 320, false).then(c => { if (!cancelled && layout.current) { layout.current.width = c.width; layout.current.height = c.height; layout.current.getContext('2d')!.drawImage(c, 0, 0); setLayoutError(''); } }).catch(e => { if (!cancelled) setLayoutError(msg(e)); });
+    void montage(wells, title, 320, false, groupOrder, display).then(c => { if (!cancelled && layout.current) { layout.current.width = c.width; layout.current.height = c.height; layout.current.getContext('2d')!.drawImage(c, 0, 0); setLayoutError(''); } }).catch(e => { if (!cancelled) setLayoutError(msg(e)); });
     return () => { cancelled = true; };
-  }, [wells, title]);
+  }, [wells, title, groupOrder, display]);
+  function moveGroup(index: number, direction: number) {
+    const next = [...groupNames], target = index + direction;
+    if (target < 0 || target >= next.length) return;
+    [next[index], next[target]] = [next[target], next[index]]; setGroupOrder(next); setDownload(null);
+  }
   function patch(id: string, change: Partial<Well>) { setDownload(null); setWells(old => old.map(w => w.id === id ? { ...w, ...change } : w)); }
-  async function select(w: Well) {
+  async function select(w: Well, reveal = false) {
     const token = ++sequence.current; setActiveId(w.id); setPhoto(null); setError('');
     try { const value = await readPhoto(w.file); if (token === sequence.current) setPhoto({ id: w.id, value }); } catch (e) { if (token === sequence.current) setError(msg(e)); }
+    if (reveal && token === sequence.current) editor.current?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
   async function importFiles(list: FileList | null) {
     if (!list?.length || busy) return; setBusy(true); setError(''); const added: Well[] = []; let failed = 0;
@@ -131,7 +155,7 @@ export default function ColonyAnalyzer() {
         const file = files[i], path = file.webkitRelativePath || file.name; setStatus(`读取 ${i + 1}/${files.length}`);
         try {
           const p = await readPhoto(file), { width, height } = p.frame;
-          added.push({ id: crypto.randomUUID(), file, path, group: '', replicate: file.name.replace(/\.[^.]+$/, ''), included: true, show: true, width, height, hash: p.hash, roi: circle(width, height), confirmed: false, reviewed: false, manual: false });
+          added.push({ id: crypto.randomUUID(), file, path, group: '', replicate: file.name.replace(/\.[^.]+$/, ''), included: true, show: true, width, height, hash: p.hash, roi: circle(width, height), preview: thumbnail(p.canvas), confirmed: false, reviewed: false, manual: false });
         } catch (e) {
           failed++; added.push({ id: crypto.randomUUID(), file, path, group: '', replicate: file.name, included: false, show: false, width: 0, height: 0, hash: '', roi: { cx: 0, cy: 0, r: 0 }, confirmed: false, reviewed: false, manual: false, error: msg(e) });
         }
@@ -145,7 +169,7 @@ export default function ColonyAnalyzer() {
     if (!active) return;
     const next = bounded(roi, active.width, active.height);
     if (Math.abs(next.cx - active.roi.cx) + Math.abs(next.cy - active.roi.cy) + Math.abs(next.r - active.roi.r) < 1e-8) return;
-    patch(active.id, { roi: next, confirmed: false, result: undefined, points: undefined, parameters: undefined, reviewed: false, manual: false, error: undefined, thumb: undefined, createdAt: undefined });
+    patch(active.id, { roi: next, confirmed: false, result: undefined, points: undefined, parameters: undefined, reviewed: false, manual: false, error: undefined, thumb: undefined, displayBackground: undefined, createdAt: undefined });
     setUndo(old => ({ ...old, [active.id]: [] }));
   }
   async function confirmRoi(all = false) {
@@ -155,10 +179,11 @@ export default function ColonyAnalyzer() {
       for (const w of targets) {
         const roi = all ? bounded({ cx: active.roi.cx / active.width * w.width, cy: active.roi.cy / active.height * w.height, r: active.roi.r / Math.min(active.width, active.height) * Math.min(w.width, w.height) }, w.width, w.height) : active.roi;
         const p = w.id === active.id ? loaded : await readPhoto(w.file), changed = JSON.stringify(roi) !== JSON.stringify(w.roi);
-        patch(w.id, { roi, confirmed: true, thumb: cropped(p.canvas, roi, 320).toDataURL('image/png'), ...(changed ? { result: undefined, points: undefined, parameters: undefined, manual: false, reviewed: false, createdAt: undefined } : {}) });
+        patch(w.id, { roi, confirmed: true, thumb: cropped(p.canvas, roi, 320).toDataURL('image/png'), displayBackground: estimateColonyBackground(p.frame, roi), ...(changed ? { result: undefined, points: undefined, parameters: undefined, manual: false, reviewed: false, createdAt: undefined } : {}) });
       }
       setStatus(all ? '已应用相同比例圈选；人工修正及已复核图已保留。请逐张检查孔底。' : '圈选已确认。');
-    } catch (e) { setError(msg(e)); } finally { setBusy(false); }
+      return true;
+    } catch (e) { setError(msg(e)); return false; } finally { setBusy(false); }
   }
   async function run(all: boolean) {
     if (busy || !active) return; setBusy(true); setRunning(true); stop.current = false; setError('');
@@ -194,7 +219,7 @@ export default function ColonyAnalyzer() {
   async function exportImages(bundle: boolean) {
     if (busy) return; setBusy(true); setError('');
     try {
-      const composed = await png(await montage(wells, title, 600, true));
+      const composed = await png(await montage(wells, title, 600, true, groupOrder, display));
       if (!bundle) { offer('平板克隆_排版.png', composed); return; }
       const bytes = (s: string) => new TextEncoder().encode(s);
       const entries: ExportArchiveEntry[] = [{ name: '平板克隆_排版.png', data: await composed.arrayBuffer() }, { name: '逐孔统计.csv', data: bytes(colonyCsv(rows)) }, { name: 'Prism.tsv', data: bytes(tsv) }];
@@ -206,7 +231,7 @@ export default function ColonyAnalyzer() {
         for (const point of w.points ?? []) { ctx.beginPath(); ctx.arc((point.x - w.roi.cx + w.roi.r) * scale, (point.y - w.roi.cy + w.roi.r) * scale, Math.max(3, Math.sqrt(point.area / Math.PI) * scale), 0, Math.PI * 2); ctx.strokeStyle = '#ff684a'; ctx.lineWidth = 1.5; ctx.stroke(); }
         entries.push({ name: `${String(i + 1).padStart(3, '0')}_${safeFilePart(w.path)}_标记.png`, data: await (await png(c)).arrayBuffer() });
       }
-      entries.push({ name: 'metadata.json', data: bytes(JSON.stringify({ schema: 'colony-v1', title, exportedAt: new Date().toISOString(), analysis: 'Native RGB, manually confirmed circular ROI, stain connected components, reviewed correction points', prism: 'One included successful well per value; rows do not imply matching or independent biological replicates', layout: groupsFor(wells).map(([group, entries]) => ({ group, files: entries.map(w => w.path) })), wells: wells.map(({ file, thumb, ...w }) => ({ ...w, sourceName: file.name, hasPreview: !!thumb })) }, null, 2)) });
+      entries.push({ name: 'metadata.json', data: bytes(JSON.stringify({ schema: 'colony-v2', title, exportedAt: new Date().toISOString(), analysis: 'Native RGB, manually confirmed circular ROI, stain connected components, reviewed correction points', prism: 'One included successful well per value; rows do not imply matching or independent biological replicates', display: { ...display, method: 'Uniform RGB channel scaling by target / original ROI background median (additive fallback for zero background); display only, counts and marked images use original RGB' }, groupOrder: groupNames, layout: groupsFor(wells, groupOrder).map(([group, entries]) => ({ group, files: entries.map(w => w.path) })), wells: wells.map(({ file, thumb, preview, ...w }) => ({ ...w, sourceName: file.name, hasPreview: !!(thumb || preview) })) }, null, 2)) });
       offer('平板克隆_全部结果.zip', new Blob([await createStoredZip(entries)], { type: 'application/zip' })); setStatus('图片、逐孔数据和 Prism 表已导出。');
     } catch (e) { setError(msg(e)); } finally { setBusy(false); }
   }
@@ -219,7 +244,7 @@ export default function ColonyAnalyzer() {
     <div className="if-layout"><aside className="if-sidebar">
       <section className="if-card"><h2>单孔图片</h2><div className="if-actions"><button disabled={busy} onClick={() => input.current?.click()}>选择图片</button><button disabled={busy} onClick={() => folder.current?.click()}>选择文件夹</button></div>
         <input ref={input} hidden type="file" multiple accept=".jpg,.jpeg,.png,.webp,.bmp,.tif,.tiff" onChange={e => { void importFiles(e.target.files); e.target.value = ''; }} /><input ref={folder} hidden type="file" multiple {...{ webkitdirectory: '' }} onChange={e => { void importFiles(e.target.files); e.target.value = ''; }} />
-        <div className="if-files">{wells.map((w, i) => <button key={w.id} disabled={busy || !w.width} aria-pressed={w.id === activeId} onClick={() => void select(w)}><span>{i + 1}. {w.path}</span><small>{!w.included ? '不纳入' : w.error ? '失败' : w.reviewed ? '已复核' : w.points ? `${w.points.length} 个` : w.confirmed ? '待统计' : '待圈选'}</small></button>)}</div>
+        <div className="if-files">{wells.map((w, i) => <button key={w.id} disabled={busy || !w.width} aria-pressed={w.id === activeId} onClick={() => void select(w, true)}><span>{i + 1}. {w.path}</span><small>{!w.included ? '不纳入' : w.error ? '失败' : w.reviewed ? '已复核' : w.points ? `${w.points.length} 个` : w.confirmed ? '待统计' : '待圈选'}</small></button>)}</div>
         <div className="if-actions"><button className="primary" disabled={busy || !active?.confirmed || !loaded} onClick={() => void run(false)}>统计此图</button><button disabled={busy || !wells.length} onClick={() => void run(true)}>统计全部</button>{running && <button onClick={() => { stop.current = true; }}>停止统计</button>}</div><p role="status" className="if-hint">{status || '导入单孔照片 → 圈孔底 → 填组别。'}</p>{download && <a className="if-download" href={download.url} download={download.name}>下载文件 · {download.name}</a>}
       </section>
       <section className="if-card"><h2>圈选与分组</h2><fieldset disabled={busy || !active || !loaded}>
@@ -237,20 +262,30 @@ export default function ColonyAnalyzer() {
         <label className="if-check"><input type="checkbox" checked={parameters.excludeEdge} onChange={e => setParameters(p => ({ ...p, excludeEdge: e.target.checked }))} />排除触圈边缘对象</label><p className="if-hint">原始像素面积。粘连和深色杂物需人工复核；点击已有标记删除，点击空白补计。</p>
       </fieldset></details>
     </aside><section className="if-results">
-      <div className="if-card if-view"><div className="if-viewbar"><strong>{active?.path ?? '单孔预览'}</strong><b>{active?.points ? `${active.points.length} 个克隆` : ''}</b><label className="if-check"><input type="checkbox" checked={showMarks} onChange={e => setShowMarks(e.target.checked)} />显示标记</label><select aria-label="平板预览缩放" value={zoom} onChange={e => setZoom(Number(e.target.value))}><option value="100">适应</option><option value="150">150%</option><option value="250">250%</option><option value="400">400%</option></select></div>
+      <section className="if-card colony-picker" ref={picker}><div className="if-section-head"><h2>选图与排版</h2><button disabled={busy || !groupsFor(wells).length} onClick={() => void exportImages(false)}>导出排版 PNG</button></div>
+        <label className="colony-title">标题<input aria-label="排版标题" value={title} placeholder="填写细胞系或实验名称" maxLength={100} onChange={e => { setTitle(e.target.value); setDownload(null); }} disabled={busy} /></label>
+        <div className="colony-display-controls"><label>排版底色<input aria-label="排版底色" onInput={e => { const value = e.currentTarget.value; setDisplay(d => ({ ...d, canvas: value })); setDownload(null); }} type="color" value={display.canvas} disabled={busy} onChange={e => { setDisplay(d => ({ ...d, canvas: e.target.value })); setDownload(null); }} /></label><label className="if-check"><input aria-label="调整孔内底色" type="checkbox" checked={display.recolor} disabled={busy} onChange={e => { setDisplay(d => ({ ...d, recolor: e.target.checked })); setDownload(null); }} />调整孔内底色</label><label>孔内底色<input aria-label="孔内底色" onInput={e => { const value = e.currentTarget.value; setDisplay(d => ({ ...d, well: value })); setDownload(null); }} type="color" value={display.well} disabled={busy || !display.recolor} onChange={e => { setDisplay(d => ({ ...d, well: e.target.value })); setDownload(null); }} /></label></div>
+        {display.recolor && <p className="if-hint">调色仅用于展示，统计使用原图。</p>}
+        {!!groupNames.length && <div className="colony-order" aria-label="组别顺序"><span>从左到右</span>{groupNames.map((group, i) => <div key={group}><button aria-label={`${group} 左移`} disabled={busy || i === 0} onClick={() => moveGroup(i, -1)}>←</button><b>{group}</b><button aria-label={`${group} 右移`} disabled={busy || i === groupNames.length - 1} onClick={() => moveGroup(i, 1)}>→</button></div>)}</div>}
+        {!!wells.length && <div className="if-section-head colony-pick-tools"><span>点击图片选择展示</span><div className="if-actions"><button disabled={busy} onClick={() => { setWells(old => old.map(w => ({ ...w, show: !!w.width }))); setDownload(null); }}>全选</button><button disabled={busy} onClick={() => { setWells(old => old.map(w => ({ ...w, show: false }))); setDownload(null); }}>清空选择</button></div></div>}
+        <div className="colony-choices">{wells.map((w, i) => <article key={w.id} className="colony-choice" data-selected={w.show}>
+          <label className="colony-pick"><input type="checkbox" aria-label={`展示 ${i + 1}`} checked={w.show} disabled={busy || !w.width} onChange={e => patch(w.id, { show: e.target.checked })} /><span>{w.show ? '已选' : '展示'}</span>{w.thumb || w.preview ? <img src={w.thumb || w.preview} alt={`${w.path} 缩略图`} /> : <span className="colony-no-preview">无法读取</span>}</label>
+          <strong title={w.path}>{w.file.name}</strong><label>组别<input aria-label={`组别 ${i + 1}`} value={w.group} placeholder="填写组别" disabled={busy} maxLength={80} onChange={e => patch(w.id, { group: e.target.value })} /></label>
+          <div className="colony-choice-actions"><button disabled={busy || !w.width} aria-label={`圈选 ${w.path}`} onClick={() => { setMode('roi'); void select(w, true); }}>调整圆圈</button><small>{w.confirmed ? '已圈选' : '待圈选'}</small></div>
+        </article>)}</div>
+        {(!groupsFor(wells).length || layoutError) && <p className="if-hint">{groupsFor(wells).length ? layoutError : '选择图片、填写组别并确认圆圈，即可预览排版。'}</p>}
+        {wells.some(w => w.show && (!w.confirmed || !w.group.trim())) && <p className="if-hint">尚未圈选或填写组别的图片暂不进入排版。</p>}
+        <div className="colony-layout" style={{ background: display.canvas }}><canvas aria-label="平板克隆自动排版" ref={layout} /></div>
+        {!!wells.length && <details className="colony-count-settings"><summary>逐孔统计设置</summary><div className="if-table"><table><thead><tr><th>原图</th><th>孔号 / 重复</th><th>纳入统计</th><th>克隆数</th></tr></thead><tbody>{wells.map((w, i) => <tr key={w.id}><td>{w.path}</td><td><input aria-label={`孔号 ${i + 1}`} value={w.replicate} disabled={busy} onChange={e => patch(w.id, { replicate: e.target.value })} /></td><td><input type="checkbox" aria-label={`纳入 ${i + 1}`} checked={w.included} disabled={busy} onChange={e => patch(w.id, { included: e.target.checked })} /></td><td>{w.points?.length ?? '—'}</td></tr>)}</tbody></table></div></details>}
+      </section>
+      <div className="if-card if-view" ref={editor}><div className="if-viewbar"><strong>{active?.path ?? '单孔预览'}</strong><b>{active?.points ? `${active.points.length} 个克隆` : ''}</b><button disabled={busy || !loaded} onClick={async () => { if (await confirmRoi()) picker.current?.scrollIntoView({ behavior: 'smooth', block: 'start' }); }}>确认并返回排版</button><label className="if-check"><input type="checkbox" checked={showMarks} onChange={e => setShowMarks(e.target.checked)} />显示标记</label><select aria-label="平板预览缩放" value={zoom} onChange={e => setZoom(Number(e.target.value))}><option value="100">适应</option><option value="150">150%</option><option value="250">250%</option><option value="400">400%</option></select></div>
         {loaded ? <div className="colony-canvas"><canvas ref={canvas} style={{ width: zoom === 100 ? 'auto' : `${zoom}%`, maxWidth: zoom === 100 ? '100%' : 'none', maxHeight: zoom === 100 ? 620 : 'none' }} aria-label="平板圈选与克隆标记" onPointerDown={down} onPointerMove={move} onPointerUp={end} onPointerCancel={() => { drag.current = null; }} /></div> : <div className="if-empty"><span>◉</span><h3>圈选 · 计数 · 排版</h3></div>}
         {active?.error && <p className="if-error">{active.error}{active.points ? '（保留旧结果，暂不进入 Prism）' : ''}</p>}{!!active?.result?.warnings.length && <details className="colony-warnings"><summary>检查提示</summary>{active.result.warnings.map((w, i) => <p key={i}>{w}</p>)}</details>}
       </div>
-      <section className="if-card"><div className="if-section-head"><h2>分组与排版</h2><button disabled={busy || !groupsFor(wells).length} onClick={() => void exportImages(false)}>导出排版 PNG</button></div>
-        <label className="colony-title">标题<input aria-label="排版标题" value={title} placeholder="例如 HucCT1" maxLength={100} onChange={e => setTitle(e.target.value)} disabled={busy} /></label>
-        <div className="if-table"><table><thead><tr><th>原图</th><th>组别</th><th>孔号 / 重复</th><th>纳入</th><th>排版</th><th>克隆数</th></tr></thead><tbody>{wells.map((w, i) => <tr key={w.id}><td title={w.path}>{w.path}</td><td><input aria-label={`组别 ${i + 1}`} value={w.group} disabled={busy} maxLength={80} onChange={e => patch(w.id, { group: e.target.value })} /></td><td><input aria-label={`孔号 ${i + 1}`} value={w.replicate} disabled={busy} onChange={e => patch(w.id, { replicate: e.target.value })} /></td><td><input type="checkbox" aria-label={`纳入 ${i + 1}`} checked={w.included} disabled={busy} onChange={e => patch(w.id, { included: e.target.checked })} /></td><td><input type="checkbox" aria-label={`排版 ${i + 1}`} checked={w.show} disabled={busy} onChange={e => patch(w.id, { show: e.target.checked })} /></td><td>{w.points?.length ?? '—'}</td></tr>)}</tbody></table></div>
-        <p className="if-hint">同组自动排成一列；仅展示代表孔时，取消其他孔的“排版”，统计数据仍保留。总览图请取消“纳入”。</p>
-        {(!groupsFor(wells).length || layoutError) && <p className="if-hint">{groupsFor(wells).length ? layoutError : '填写组别并确认圈选后自动排版。'}</p>}<div className="colony-layout"><canvas aria-label="平板克隆自动排版" ref={layout} /></div>
-      </section>
       <section className="if-card"><div className="if-section-head"><h2>Prism 数据</h2><button disabled={!summary.length || busy} onClick={() => void copyPrism()}>复制数据</button></div><textarea ref={prism} aria-label="Prism 数据表" readOnly value={tsv} rows={Math.min(10, Math.max(3, tsv.split('\n').length))} /><p className="if-hint">每列一组，每个数对应一个孔。未统计、失败、不纳入或未填写组别的图不进入此表；孔不自动视为独立实验。</p>
         {!!summary.length && <div className="if-table"><table><thead><tr><th>组别</th><th>孔数</th><th>均值</th><th>SD</th></tr></thead><tbody>{summary.map(s => <tr key={s.group}><td>{s.group}</td><td>{s.n}</td><td>{s.mean.toFixed(1)}</td><td>{s.sd === null ? '—' : s.sd.toFixed(1)}</td></tr>)}</tbody></table></div>}
       </section>
-      <details className="if-method"><summary>方法与导出</summary><p>在原始 RGB 照片的确认圆圈内，按染色强度和面积筛选连通对象，作为克隆数估计。粘连对象不自动拆分；人工加删会保留自动结果。平板照片不能直接验证每个克隆是否达到指定细胞数。相同实验使用统一参数，并逐孔检查标记。</p><p>排版使用原图圆形裁切和等大缩放，不改变孔内颜色。组名按列表首次出现顺序排列，孔按导入顺序排列；图片选择不影响统计纳入。ZIP 含排版图、标记图、逐孔 CSV、Prism TSV 和原图校验值、圈选、参数、自动/人工计数及复核状态。所有处理在浏览器本地完成，关闭前请导出。</p></details>
+      <details className="if-method"><summary>方法与导出</summary><p>在原始 RGB 照片的确认圆圈内，按染色强度和面积筛选连通对象，作为克隆数估计。粘连对象不自动拆分；人工加删会保留自动结果。平板照片不能直接验证每个克隆是否达到指定细胞数。相同实验使用统一参数，并逐孔检查标记。</p><p>排版使用圆形裁切和等大缩放。可选孔内调色按原始圈内背景中位数，对 RGB 通道做统一比例校正，背景为零的通道使用加法；存在亮部截断；仅改变展示图，统计和标记图使用原图。组名顺序由左右箭头调整，Prism 同步；孔按导入顺序排列。展示选择与统计纳入分别设置。ZIP 含排版图、标记图、逐孔 CSV、Prism TSV 和原图校验值、圈选、调色设置、自动/人工计数及复核状态。所有处理在浏览器本地完成，关闭前请导出。</p></details>
     </section></div></main>
   </div>;
 }

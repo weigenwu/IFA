@@ -9,6 +9,13 @@ export interface ColonyExportRow {
 const validCount = (value: number | null): value is number => value !== null && Number.isSafeInteger(value) && value >= 0;
 const eligible = (row: ColonyExportRow) => row.included && !row.error.trim() && !!row.group.trim() && validCount(row.count);
 
+/** Use explicit user order, followed by unlisted groups in first-appearance order. */
+export function colonyGroupNames(rows: readonly { group: string }[], order: readonly string[] = []): string[] {
+  const names = [...new Set(rows.map(row => row.group.trim()).filter(Boolean))];
+  const preferred = [...new Set(order.map(name => name.trim()))].filter(name => names.includes(name));
+  return [...preferred, ...names.filter(name => !preferred.includes(name))];
+}
+
 function status(row: ColonyExportRow): string {
   if (row.error.trim()) return validCount(row.count) ? '失败（保留旧计数）' : '失败';
   if (!row.included) return '已排除';
@@ -30,14 +37,14 @@ export function colonyCsv(rows: ColonyExportRow[]): string {
   ]);
 }
 
-function groupedCounts(rows: ColonyExportRow[]): Map<string, number[]> {
+function groupedCounts(rows: ColonyExportRow[], order?: readonly string[]): Map<string, number[]> {
   const groups = new Map<string, number[]>();
   for (const row of rows) if (row.included && row.group.trim()) {
     const group = row.group.trim();
     if (!groups.has(group)) groups.set(group, []);
     if (eligible(row)) groups.get(group)!.push(row.count!);
   }
-  return new Map([...groups].filter(([, counts]) => counts.length));
+  return new Map(colonyGroupNames([...groups.keys()].map(group => ({ group })), order).filter(group => groups.get(group)!.length).map(group => [group, groups.get(group)!]));
 }
 
 function tsvHeader(value: string): string {
@@ -46,8 +53,8 @@ function tsvHeader(value: string): string {
 }
 
 /** Independent group columns; row alignment does not encode matching or pairing. */
-export function prismTsv(rows: ColonyExportRow[]): string {
-  const groups = [...groupedCounts(rows)];
+export function prismTsv(rows: ColonyExportRow[], order?: readonly string[]): string {
+  const groups = [...groupedCounts(rows, order)];
   if (!groups.length) return '';
   const lines = [groups.map(([group]) => tsvHeader(group)).join('\t')];
   const length = Math.max(...groups.map(([, counts]) => counts.length));
@@ -55,8 +62,8 @@ export function prismTsv(rows: ColonyExportRow[]): string {
   return lines.join('\r\n');
 }
 
-export function colonySummary(rows: ColonyExportRow[]): { group: string; n: number; mean: number; sd: number | null }[] {
-  return [...groupedCounts(rows)].map(([group, counts]) => {
+export function colonySummary(rows: ColonyExportRow[], order?: readonly string[]): { group: string; n: number; mean: number; sd: number | null }[] {
+  return [...groupedCounts(rows, order)].map(([group, counts]) => {
     let mean = 0, sumSquared = 0;
     counts.forEach((count, i) => { const delta = count - mean; mean += delta / (i + 1); sumSquared += delta * (count - mean); });
     return { group, n: counts.length, mean, sd: counts.length > 1 ? Math.sqrt(sumSquared / (counts.length - 1)) : null };
