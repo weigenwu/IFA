@@ -12,7 +12,7 @@ import './colony.css';
 
 type Photo = { canvas: HTMLCanvasElement; frame: RGBAFrame; hash: string };
 type Well = { id: string; file: File; path: string; group: string; replicate: string; included: boolean; show: boolean; width: number; height: number; hash: string; roi: ColonyCircle; confirmed: boolean; preview?: string; thumb?: string; displayBackground?: [number, number, number]; result?: ColonyResult; points?: ColonyPoint[]; parameters?: ColonyParameters; reviewed: boolean; manual: boolean; error?: string; createdAt?: string };
-type DisplaySettings = { canvas: string; recolor: boolean; well: string; strength: number };
+type DisplaySettings = { canvas: string; recolor: boolean; well: string; strength: number; lineWidth: number };
 const msg = (e: unknown) => e instanceof Error ? e.message : String(e);
 const tick = () => new Promise<void>(resolve => setTimeout(resolve, 0));
 const circle = (w: number, h: number): ColonyCircle => ({ cx: w / 2, cy: h / 2, r: Math.min(w, h) * .42 });
@@ -49,7 +49,7 @@ function thumbnail(source: HTMLCanvasElement) {
   c.width = Math.round(source.width * scale); c.height = Math.round(source.height * scale);
   c.getContext('2d')!.drawImage(source, 0, 0, c.width, c.height); return c.toDataURL('image/jpeg', .85);
 }
-function cropped(source: CanvasImageSource, roi: ColonyCircle, size: number, display: DisplaySettings = { canvas: '#ffffff', recolor: false, well: '#d2d2d2', strength: .85 }, background?: [number, number, number]) {
+function cropped(source: CanvasImageSource, roi: ColonyCircle, size: number, display: DisplaySettings = { canvas: '#ffffff', recolor: false, well: '#d2d2d2', strength: .85, lineWidth: 2 }, background?: [number, number, number]) {
   const c = document.createElement('canvas'); c.width = c.height = size;
   const ctx = c.getContext('2d')!; ctx.fillStyle = display.canvas; ctx.fillRect(0, 0, size, size);
   ctx.save(); ctx.beginPath(); ctx.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2); ctx.clip();
@@ -89,7 +89,7 @@ async function montage(wells: Well[], title: string, size: number, originals: bo
   const rgb = display.canvas.slice(1).match(/../g)!.map(v => parseInt(v, 16));
   const ink = rgb[0] * .299 + rgb[1] * .587 + rgb[2] * .114 < 128 ? '#ffffff' : '#111111';
   ctx.fillStyle = ink; ctx.textAlign = 'center';
-  if (title) { ctx.font = `bold ${32 * unit}px Arial, Microsoft YaHei`; ctx.fillText(title, canvas.width / 2, 38 * unit, canvas.width - gap * 2); ctx.strokeStyle = ink; ctx.lineWidth = 2 * unit; ctx.beginPath(); ctx.moveTo(gap, 52 * unit); ctx.lineTo(canvas.width - gap, 52 * unit); ctx.stroke(); }
+  if (title) { ctx.font = `bold ${32 * unit}px Arial, Microsoft YaHei`; ctx.fillText(title, canvas.width / 2, 38 * unit, canvas.width - gap * 2); if (display.lineWidth > 0) { ctx.strokeStyle = ink; ctx.lineWidth = display.lineWidth * unit; ctx.beginPath(); ctx.moveTo(gap, 52 * unit); ctx.lineTo(canvas.width - gap, 52 * unit); ctx.stroke(); } }
   for (let col = 0; col < groups.length; col++) {
     const [group, entries] = groups[col]; const x = gap + col * (size + gap);
     ctx.font = `bold ${26 * unit}px Arial, Microsoft YaHei`; ctx.fillStyle = ink; ctx.fillText(group, x + size / 2, top - 18 * unit, size);
@@ -112,7 +112,7 @@ export default function ColonyAnalyzer() {
   const [showMarks, setShowMarks] = useState(true), [layoutError, setLayoutError] = useState('');
   const [zoom, setZoom] = useState(100);
   const [groupOrder, setGroupOrder] = useState<string[]>([]);
-  const [display, setDisplay] = useState<DisplaySettings>({ canvas: '#ffffff', recolor: true, well: '#d2d2d2', strength: .85 });
+  const [display, setDisplay] = useState<DisplaySettings>({ canvas: '#ffffff', recolor: true, well: '#d2d2d2', strength: .85, lineWidth: 2 });
   const [download, setDownload] = useState<{ url: string; name: string } | null>(null);
   const [undo, setUndo] = useState<Record<string, ColonyPoint[][]>>({});
   const input = useRef<HTMLInputElement>(null), folder = useRef<HTMLInputElement>(null), canvas = useRef<HTMLCanvasElement>(null), layout = useRef<HTMLCanvasElement>(null), prism = useRef<HTMLTextAreaElement>(null), editor = useRef<HTMLDivElement>(null), picker = useRef<HTMLElement>(null);
@@ -236,6 +236,25 @@ export default function ColonyAnalyzer() {
     } catch (e) { setError(msg(e)); } finally { setBusy(false); }
   }
   async function copyPrism() { try { await navigator.clipboard.writeText(tsv); setStatus('已复制，可直接粘贴到 Prism 的 Column 表。'); } catch { prism.current?.focus(); prism.current?.select(); setStatus('已选中数据，请按 Ctrl+C 复制。'); } }
+  async function exportPpt() {
+    if (busy) return; setBusy(true); setError('');
+    try {
+      const groups = [];
+      for (const [name, entries] of groupsFor(wells, groupOrder)) {
+        const images = [];
+        for (const w of entries) {
+          const p = await readPhoto(w.file); if (p.hash !== w.hash) throw new Error('源图校验不一致');
+          const c = cropped(p.canvas, w.roi, 600, display, w.displayBackground), ctx = c.getContext('2d')!;
+          ctx.globalCompositeOperation = 'destination-in'; ctx.beginPath(); ctx.arc(300, 300, 300, 0, Math.PI * 2); ctx.fill();
+          images.push({ name: w.path, dataUrl: c.toDataURL('image/png') });
+        }
+        groups.push({ name, images });
+      }
+      const { colonyPptx } = await import('../lib/colony-pptx');
+      offer('平板克隆_可编辑.pptx', new Blob([await colonyPptx({ title, groups, canvasColor: display.canvas, lineWidth: display.lineWidth, notes: JSON.stringify({ display, note: '展示调色不用于计数；标题、组名、横线为可编辑对象，孔图为独立 PNG。', sources: groupsFor(wells, groupOrder).flatMap(([, entries]) => entries.map(w => ({ file: w.path, sha256: w.hash, roi: w.roi, displayBackground: w.displayBackground }))) }, null, 2) })], { type: 'application/vnd.openxmlformats-officedocument.presentationml.presentation' }));
+      setStatus('PPT 已导出，标题、组名、横线和孔图可分别编辑。');
+    } catch (e) { setError(msg(e)); } finally { setBusy(false); }
+  }
 
   return <div className="if-app colony-app">
     <header className="if-header"><a className="if-brand" href="../">✳ <strong>FluoroScope</strong></a><nav aria-label="分析工具"><a href="../intensity/">荧光</a><a href="../edu/">EdU</a><a href="../scratch/">划痕</a><a href="../transwell/">Transwell</a><a href="../cck8/">CCK-8</a><a href="../if-count/">切片计数</a><a href="../colony/" aria-current="page">平板克隆</a></nav></header>
@@ -262,9 +281,10 @@ export default function ColonyAnalyzer() {
         <label className="if-check"><input type="checkbox" checked={parameters.excludeEdge} onChange={e => setParameters(p => ({ ...p, excludeEdge: e.target.checked }))} />排除触圈边缘对象</label><p className="if-hint">原始像素面积。粘连和深色杂物需人工复核；点击已有标记删除，点击空白补计。</p>
       </fieldset></details>
     </aside><section className="if-results">
-      <section className="if-card colony-picker" ref={picker}><div className="if-section-head"><h2>选图与排版</h2><button disabled={busy || !groupsFor(wells).length} onClick={() => void exportImages(false)}>导出排版 PNG</button></div>
+      <section className="if-card colony-picker" ref={picker}><div className="if-section-head"><h2>选图与排版</h2><div className="if-actions"><button disabled={busy || !groupsFor(wells).length} onClick={() => void exportImages(false)}>导出排版 PNG</button><button disabled={busy || !groupsFor(wells).length} onClick={() => void exportPpt()}>导出可编辑 PPT</button></div></div>
         <label className="colony-title">标题<input aria-label="排版标题" value={title} placeholder="填写细胞系或实验名称" maxLength={100} onChange={e => { setTitle(e.target.value); setDownload(null); }} disabled={busy} /></label>
-        <div className="if-actions"><button disabled={busy} onClick={() => { setDisplay(d => ({ ...d, recolor: false })); setDownload(null); }}>原图颜色</button><button disabled={busy} onClick={() => { setDisplay({ canvas: '#ffffff', recolor: true, well: '#d2d2d2', strength: .85 }); setDownload(null); }}>参考浅灰</button></div>
+        <div className="if-actions"><button disabled={busy} onClick={() => { setDisplay(d => ({ ...d, recolor: false })); setDownload(null); }}>原图颜色</button><button disabled={busy} onClick={() => { setDisplay(d => ({ ...d, canvas: '#ffffff', recolor: true, well: '#d2d2d2', strength: .85 })); setDownload(null); }}>参考浅灰</button></div>
+        <label className="colony-line-width">黑线粗细<input aria-label="黑线粗细" type="number" min="0" max="12" step="0.5" value={display.lineWidth} disabled={busy} onChange={e => { const lineWidth = Math.max(0, Math.min(12, Number(e.target.value) || 0)); setDisplay(d => ({ ...d, lineWidth })); setDownload(null); }} />px</label>
         <div className="colony-display-controls"><label>排版底色<input aria-label="排版底色" onInput={e => { const value = e.currentTarget.value; setDisplay(d => ({ ...d, canvas: value })); setDownload(null); }} type="color" value={display.canvas} disabled={busy} onChange={e => { setDisplay(d => ({ ...d, canvas: e.target.value })); setDownload(null); }} /></label><label className="if-check"><input aria-label="调整孔内底色" type="checkbox" checked={display.recolor} disabled={busy} onChange={e => { setDisplay(d => ({ ...d, recolor: e.target.checked })); setDownload(null); }} />调整孔内底色</label><label>孔内底色<input aria-label="孔内底色" onInput={e => { const value = e.currentTarget.value; setDisplay(d => ({ ...d, well: value })); setDownload(null); }} type="color" value={display.well} disabled={busy || !display.recolor} onChange={e => { setDisplay(d => ({ ...d, well: e.target.value })); setDownload(null); }} /></label></div>
         {display.recolor && <><label className="colony-strength">调色强度<input aria-label="调色强度" type="range" min="0" max="100" value={Math.round(display.strength * 100)} disabled={busy} onChange={e => { const strength = Number(e.target.value) / 100; setDisplay(d => ({ ...d, strength })); setDownload(null); }} /><output>{Math.round(display.strength * 100)}%</output></label><p className="if-hint">调色仅用于展示，统计使用原图。</p></>}
         {!!groupNames.length && <div className="colony-order" aria-label="组别顺序"><span>从左到右</span>{groupNames.map((group, i) => <div key={group}><button aria-label={`${group} 左移`} disabled={busy || i === 0} onClick={() => moveGroup(i, -1)}>←</button><b>{group}</b><button aria-label={`${group} 右移`} disabled={busy || i === groupNames.length - 1} onClick={() => moveGroup(i, 1)}>→</button></div>)}</div>}

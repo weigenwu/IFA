@@ -4,3 +4,5 @@
 @media(max-width:480px){.colony-choices{grid-template-columns:repeat(2,minmax(0,1fr))}.colony-pick img{height:115px}.colony-display-controls{gap:9px}}
 
 .colony-picker .colony-strength{display:flex;flex-direction:row;align-items:center;gap:10px;max-width:350px;margin:5px 0}.colony-strength input{flex:1;width:auto;accent-color:#19836b}.colony-strength output{min-width:34px}
+
+.colony-picker .colony-line-width{display:flex;flex-direction:row;align-items:center;gap:8px;margin:10px 0}.colony-line-width input{width:68px!important;padding:4px 7px}
