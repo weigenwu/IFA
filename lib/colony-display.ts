@@ -39,9 +39,10 @@ export function estimateColonyBackground(frame: RGBAFrame, roi: ColonyCircle): R
 }
 
 /** Display-only global RGB gains within the circle; supply native-image background for all output sizes. */
-export function recolorColonyBackground(frame: RGBAFrame, roi: ColonyCircle, targetHex: string, background?: RGB): { data: Uint8ClampedArray; background: RGB } {
+export function recolorColonyBackground(frame: RGBAFrame, roi: ColonyCircle, targetHex: string, background?: RGB, strength = 1): { data: Uint8ClampedArray; background: RGB } {
   const box = bounds(frame, roi);
   if (!/^#[0-9a-f]{6}$/i.test(targetHex)) throw new Error('背景颜色需使用 #RRGGBB 格式。');
+  if (!Number.isFinite(strength) || strength < 0 || strength > 1) throw new Error('背景调整强度必须为 0–1。');
   if (background && (background.length !== 3 || background.some(value => !Number.isFinite(value) || value < 0 || value > 255))) throw new Error('背景 RGB 估计值必须为 0–255。');
   const estimated: RGB = background ? [...background] : estimateColonyBackground(frame, roi);
   const targets = estimated.map((_, i) => parseInt(targetHex.slice(1 + i * 2, 3 + i * 2), 16));
@@ -51,7 +52,8 @@ export function recolorColonyBackground(frame: RGBAFrame, roi: ColonyCircle, tar
     if (!inside(x, y, roi) || data[at + 3] !== 255) continue;
     for (let c = 0; c < 3; c++) {
       const value = estimated[c] > 0 ? data[at + c] * targets[c] / estimated[c] : data[at + c] + targets[c];
-      data[at + c] = Math.max(0, Math.min(255, value));
+      const mixed = strength === 0 ? data[at + c] : strength === 1 ? value : data[at + c] + (value - data[at + c]) * strength;
+      data[at + c] = Math.max(0, Math.min(255, mixed));
     }
   }
   return { data, background: estimated };

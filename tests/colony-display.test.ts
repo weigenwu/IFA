@@ -41,6 +41,21 @@ test('a shared native background override applies the same gains instead of esti
   assert.deepEqual([...recolorColonyBackground(zeroChannel, roi, '#80ffff').data.slice(at(5, 5), at(5, 5) + 4)], [128, 255, 255, 255]);
 });
 
+test('strength 0 preserves source, 1 preserves full correction, and .85 blends before clipping', () => {
+  const source = frame(); source.data.set([40, 15, 120, 255], at(5, 5)); source.data.set([220, 200, 230, 255], at(4, 5));
+  const original = source.data.slice(), background = estimateColonyBackground(source, roi);
+  const full = recolorColonyBackground(source, roi, '#ffffff', background);
+  assert.deepEqual(recolorColonyBackground(source, roi, '#ffffff', background, 0).data, original);
+  assert.deepEqual(recolorColonyBackground(source, roi, '#ffffff', background, 1), full);
+  const partial = recolorColonyBackground(source, roi, '#ffffff', background, .85);
+  const expected = new Uint8ClampedArray(3);
+  for (let c = 0; c < 3; c++) expected[c] = original[at(5, 5) + c] + (original[at(5, 5) + c] * 255 / background[c] - original[at(5, 5) + c]) * .85;
+  assert.deepEqual(partial.data.slice(at(5, 5), at(5, 5) + 3), expected);
+  assert.deepEqual([...partial.data.slice(at(4, 5), at(4, 5) + 4)], [255, 255, 255, 255]);
+  assert.deepEqual(source.data, original);
+  for (const strength of [-.1, 1.1, NaN]) assert.throws(() => recolorColonyBackground(source, roi, '#ffffff', background, strength), /强度/);
+});
+
 test('bad color or geometry and absent opaque background fail explicitly', () => {
   const source = frame();
   assert.throws(() => recolorColonyBackground(source, roi, 'white'), /颜色/);

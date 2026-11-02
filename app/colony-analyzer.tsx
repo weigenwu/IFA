@@ -12,7 +12,7 @@ import './colony.css';
 
 type Photo = { canvas: HTMLCanvasElement; frame: RGBAFrame; hash: string };
 type Well = { id: string; file: File; path: string; group: string; replicate: string; included: boolean; show: boolean; width: number; height: number; hash: string; roi: ColonyCircle; confirmed: boolean; preview?: string; thumb?: string; displayBackground?: [number, number, number]; result?: ColonyResult; points?: ColonyPoint[]; parameters?: ColonyParameters; reviewed: boolean; manual: boolean; error?: string; createdAt?: string };
-type DisplaySettings = { canvas: string; recolor: boolean; well: string };
+type DisplaySettings = { canvas: string; recolor: boolean; well: string; strength: number };
 const msg = (e: unknown) => e instanceof Error ? e.message : String(e);
 const tick = () => new Promise<void>(resolve => setTimeout(resolve, 0));
 const circle = (w: number, h: number): ColonyCircle => ({ cx: w / 2, cy: h / 2, r: Math.min(w, h) * .42 });
@@ -49,14 +49,14 @@ function thumbnail(source: HTMLCanvasElement) {
   c.width = Math.round(source.width * scale); c.height = Math.round(source.height * scale);
   c.getContext('2d')!.drawImage(source, 0, 0, c.width, c.height); return c.toDataURL('image/jpeg', .85);
 }
-function cropped(source: CanvasImageSource, roi: ColonyCircle, size: number, display: DisplaySettings = { canvas: '#ffffff', recolor: false, well: '#ffffff' }, background?: [number, number, number]) {
+function cropped(source: CanvasImageSource, roi: ColonyCircle, size: number, display: DisplaySettings = { canvas: '#ffffff', recolor: false, well: '#d2d2d2', strength: .85 }, background?: [number, number, number]) {
   const c = document.createElement('canvas'); c.width = c.height = size;
   const ctx = c.getContext('2d')!; ctx.fillStyle = display.canvas; ctx.fillRect(0, 0, size, size);
   ctx.save(); ctx.beginPath(); ctx.arc(size / 2, size / 2, size / 2, 0, Math.PI * 2); ctx.clip();
   ctx.drawImage(source, roi.cx - roi.r, roi.cy - roi.r, roi.r * 2, roi.r * 2, 0, 0, size, size); ctx.restore();
   if (display.recolor) {
     const pixels = ctx.getImageData(0, 0, size, size);
-    const adjusted = recolorColonyBackground({ width: size, height: size, data: pixels.data }, { cx: size / 2, cy: size / 2, r: size / 2 }, display.well, background);
+    const adjusted = recolorColonyBackground({ width: size, height: size, data: pixels.data }, { cx: size / 2, cy: size / 2, r: size / 2 }, display.well, background, display.strength);
     pixels.data.set(adjusted.data); ctx.putImageData(pixels, 0, 0);
   }
   return c;
@@ -112,7 +112,7 @@ export default function ColonyAnalyzer() {
   const [showMarks, setShowMarks] = useState(true), [layoutError, setLayoutError] = useState('');
   const [zoom, setZoom] = useState(100);
   const [groupOrder, setGroupOrder] = useState<string[]>([]);
-  const [display, setDisplay] = useState<DisplaySettings>({ canvas: '#ffffff', recolor: false, well: '#ffffff' });
+  const [display, setDisplay] = useState<DisplaySettings>({ canvas: '#ffffff', recolor: true, well: '#d2d2d2', strength: .85 });
   const [download, setDownload] = useState<{ url: string; name: string } | null>(null);
   const [undo, setUndo] = useState<Record<string, ColonyPoint[][]>>({});
   const input = useRef<HTMLInputElement>(null), folder = useRef<HTMLInputElement>(null), canvas = useRef<HTMLCanvasElement>(null), layout = useRef<HTMLCanvasElement>(null), prism = useRef<HTMLTextAreaElement>(null), editor = useRef<HTMLDivElement>(null), picker = useRef<HTMLElement>(null);
@@ -264,8 +264,9 @@ export default function ColonyAnalyzer() {
     </aside><section className="if-results">
       <section className="if-card colony-picker" ref={picker}><div className="if-section-head"><h2>选图与排版</h2><button disabled={busy || !groupsFor(wells).length} onClick={() => void exportImages(false)}>导出排版 PNG</button></div>
         <label className="colony-title">标题<input aria-label="排版标题" value={title} placeholder="填写细胞系或实验名称" maxLength={100} onChange={e => { setTitle(e.target.value); setDownload(null); }} disabled={busy} /></label>
+        <div className="if-actions"><button disabled={busy} onClick={() => { setDisplay(d => ({ ...d, recolor: false })); setDownload(null); }}>原图颜色</button><button disabled={busy} onClick={() => { setDisplay({ canvas: '#ffffff', recolor: true, well: '#d2d2d2', strength: .85 }); setDownload(null); }}>参考浅灰</button></div>
         <div className="colony-display-controls"><label>排版底色<input aria-label="排版底色" onInput={e => { const value = e.currentTarget.value; setDisplay(d => ({ ...d, canvas: value })); setDownload(null); }} type="color" value={display.canvas} disabled={busy} onChange={e => { setDisplay(d => ({ ...d, canvas: e.target.value })); setDownload(null); }} /></label><label className="if-check"><input aria-label="调整孔内底色" type="checkbox" checked={display.recolor} disabled={busy} onChange={e => { setDisplay(d => ({ ...d, recolor: e.target.checked })); setDownload(null); }} />调整孔内底色</label><label>孔内底色<input aria-label="孔内底色" onInput={e => { const value = e.currentTarget.value; setDisplay(d => ({ ...d, well: value })); setDownload(null); }} type="color" value={display.well} disabled={busy || !display.recolor} onChange={e => { setDisplay(d => ({ ...d, well: e.target.value })); setDownload(null); }} /></label></div>
-        {display.recolor && <p className="if-hint">调色仅用于展示，统计使用原图。</p>}
+        {display.recolor && <><label className="colony-strength">调色强度<input aria-label="调色强度" type="range" min="0" max="100" value={Math.round(display.strength * 100)} disabled={busy} onChange={e => { const strength = Number(e.target.value) / 100; setDisplay(d => ({ ...d, strength })); setDownload(null); }} /><output>{Math.round(display.strength * 100)}%</output></label><p className="if-hint">调色仅用于展示，统计使用原图。</p></>}
         {!!groupNames.length && <div className="colony-order" aria-label="组别顺序"><span>从左到右</span>{groupNames.map((group, i) => <div key={group}><button aria-label={`${group} 左移`} disabled={busy || i === 0} onClick={() => moveGroup(i, -1)}>←</button><b>{group}</b><button aria-label={`${group} 右移`} disabled={busy || i === groupNames.length - 1} onClick={() => moveGroup(i, 1)}>→</button></div>)}</div>}
         {!!wells.length && <div className="if-section-head colony-pick-tools"><span>点击图片选择展示</span><div className="if-actions"><button disabled={busy} onClick={() => { setWells(old => old.map(w => ({ ...w, show: !!w.width }))); setDownload(null); }}>全选</button><button disabled={busy} onClick={() => { setWells(old => old.map(w => ({ ...w, show: false }))); setDownload(null); }}>清空选择</button></div></div>}
         <div className="colony-choices">{wells.map((w, i) => <article key={w.id} className="colony-choice" data-selected={w.show}>
