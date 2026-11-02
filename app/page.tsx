@@ -3,14 +3,14 @@ export default function Home() {
     <main className="app-shell portal-shell">
       <header className="topbar">
         <a className="brand" href="./" aria-label="FluoroScope 首页"><span className="brand-mark" aria-hidden="true"><i /><i /></span><span>FluoroScope</span></a>
-        <nav aria-label="分析工具"><a href="./colocalization/">荧光共定位</a><a href="./intensity/">荧光强度</a><a href="./edu/">EdU</a><a href="./scratch/">细胞划痕</a><a href="./transwell/">Transwell</a><a href="./cck8/">CCK-8</a><a href="./if-count/">切片计数</a></nav>
+        <nav aria-label="分析工具"><a href="./colocalization/">荧光共定位</a><a href="./intensity/">荧光强度</a><a href="./edu/">EdU</a><a href="./scratch/">细胞划痕</a><a href="./transwell/">Transwell</a><a href="./cck8/">CCK-8</a><a href="./if-count/">切片计数</a><a href="./colony/">平板克隆</a></nav>
         <span className="privacy-badge"><i /> 公开使用 · 无需登录</span>
       </header>
 
       <section className="portal-intro">
         <p className="eyebrow">CELL ASSAYS · LOCAL ANALYSIS</p>
         <h1>细胞实验分析</h1>
-        <p className="lede">荧光、EdU、划痕、Transwell、CCK-8 与切片计数。本地处理，无需登录。</p>
+        <p className="lede">荧光、EdU、划痕、Transwell、CCK-8、切片计数与平板克隆。本地处理，无需登录。</p>
       </section>
 
       <section className="tool-portal" aria-label="选择分析工具">
@@ -57,6 +57,12 @@ export default function Home() {
           <span className="tool-index">07 · IF CELL COUNT</span>
           <h2>切片细胞计数</h2>
           <p>圈定区域、紫色阳性与绿紫双阳性计数、批量导出。</p>
+          <strong>打开 <span>→</span></strong>
+        </a>
+        <a className="tool-card coloc-tool" href="./colony/">
+          <span className="tool-index">08 · COLONY FORMATION</span>
+          <h2>平板克隆</h2>
+          <p>圈孔计数、自定义组别排版、Prism 数据导出。</p>
           <strong>打开 <span>→</span></strong>
         </a>
       </section>

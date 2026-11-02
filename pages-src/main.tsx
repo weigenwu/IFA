@@ -7,6 +7,7 @@ import EduAnalyzer from '../app/edu-analyzer';
 import MigrationAnalyzer from '../app/migration-analyzer';
 import Cck8Analyzer from '../app/cck8-analyzer';
 import IfCountAnalyzer from '../app/if-count-analyzer';
+import ColonyAnalyzer from '../app/colony-analyzer';
 import '../app/globals.css';
 import Home from '../app/page';
 
@@ -25,6 +26,8 @@ const page = path.endsWith('/colocalization')
     ? <Cck8Analyzer />
   : path.endsWith('/if-count')
     ? <IfCountAnalyzer />
+  : path.endsWith('/colony')
+    ? <ColonyAnalyzer />
     : <Home />;
 
 createRoot(document.getElementById('root')!).render(

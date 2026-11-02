@@ -377,7 +377,7 @@ export default function IfCountAnalyzer() {
   }
 
   return <div className="if-app">
-    <header className="if-header"><a className="if-brand" href="../">✳ <strong>FluoroScope</strong></a><nav aria-label="分析工具"><a href="../intensity/">荧光</a><a href="../edu/">EdU</a><a href="../scratch/">划痕</a><a href="../transwell/">Transwell</a><a href="../cck8/">CCK-8</a><a aria-current="page" href="../if-count/">切片计数</a></nav><small>图像仅在本地处理</small></header>
+    <header className="if-header"><a className="if-brand" href="../">✳ <strong>FluoroScope</strong></a><nav aria-label="分析工具"><a href="../intensity/">荧光</a><a href="../edu/">EdU</a><a href="../scratch/">划痕</a><a href="../transwell/">Transwell</a><a href="../cck8/">CCK-8</a><a aria-current="page" href="../if-count/">切片计数</a><a href="../colony/">平板克隆</a></nav><small>图像仅在本地处理</small></header>
     <main className="if-main">
       <div className="if-heading"><div><small>SPATIAL CELL COUNT</small><h1>免疫荧光切片计数</h1></div><div className="if-actions"><button disabled={!completed.length || busy || draw} onClick={() => offer('切片计数_区域汇总.csv', new Blob([summaryCsv(completed)], { type: 'text/csv;charset=utf-8' }))}>汇总 CSV · {completed.length}</button><button disabled={!completed.length || busy || draw} onClick={() => void exportAll()}>全部结果 ZIP</button></div></div>
       {error && <div className="if-alert" role="alert">{error}</div>}
