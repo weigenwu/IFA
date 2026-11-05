@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { analyzeIf, summarizeIf, pointInPolygon, type Parameters, type Region } from '../lib/if-count.ts';
+import { analyzeIf, summarizeIf, pointInPolygon, addManualIfCell, type Parameters, type Region } from '../lib/if-count.ts';
 
 const parameters: Parameters = { nucleusThreshold: 10, aThreshold: 20, bThreshold: 20, minArea: 1, maxArea: 100,
   median: false, excludeEdge: false, radius: 0, minPositiveFraction: .1 };
@@ -18,7 +18,7 @@ test('nuclear association uses circular distance, unique nearest ownership, dete
   const result = analyzeIf(nucleus, a, b, 9, 5, { ...parameters, radius: 3, minPositiveFraction: .01 }, []);
   assert.equal(result.cells.length, 2);
   assert.deepEqual(result.cells.map(cell => [cell.aPositive, cell.bPositive]), [[true, true], [false, true]]);
-  assert.equal(result.cells[0].overlapFraction, result.cells[0].aFraction / 2); // (0,0) is within radius 3.
+  assert.equal(result.cells[0].overlapFraction, result.cells[0].aFraction! / 2); // (0,0) is within radius 3.
   assert.deepEqual([nucleus, a, b], originals);
   const radius2 = analyzeIf(nucleus, a, b, 9, 5, { ...parameters, radius: 2, minPositiveFraction: .01 }, []);
   assert.equal(radius2.cells[0].overlapFraction, radius2.cells[0].aFraction);
@@ -84,4 +84,29 @@ test('empty/edge-filtered images retain null denominators and parameter/region f
   assert.throws(() => summarizeIf([], [box('a', 0, 0, 2, 2), box('a', 2, 2, 2, 2)], 5, 5));
   assert.throws(() => summarizeIf([], [box('a', 0, 0, 2, 2, 'tissue'), box('b', 2, 2, 2, 2, 'tissue')], 5, 5));
   assert.throws(() => summarizeIf([], [{ id: 'a', name: 'a', kind: 'region', points: [{ x: 0, y: 0 }, { x: 4, y: 4 }, { x: 0, y: 4 }, { x: 4, y: 0 }] }], 5, 5), /交叉/);
+});
+
+test('manual points retain unmeasured values, unique IDs and shared region ownership without mutating inputs', () => {
+  const regions = [box('tissue', 1, 1, 8, 6, 'tissue'), box('first', 1, 1, 5, 3), box('second', 4, 1, 4, 3)];
+  const first = addManualIfCell([], { x: 4.5, y: 2.5 }, regions, 10, 8, true, true);
+  const cells = [first];
+  const before = structuredClone({ cells, regions });
+  const interstitium = addManualIfCell(cells, { x: 7.5, y: 5.5 }, regions, 10, 8, true);
+  const outside = addManualIfCell([first, interstitium], { x: .5, y: 7.5 }, regions, 10, 8);
+  assert.deepEqual({ cells, regions }, before);
+  assert.deepEqual([first, interstitium, outside].map(cell => [cell.id, cell.regionId]), [[1, 'first'], [2, 'tissue'], [3, null]]);
+  assert.deepEqual([first.area, first.aMean, first.bMean, first.aFraction, first.bFraction, first.overlapFraction], Array(6).fill(null));
+  assert.equal(first.manual, true);
+  assert.equal(first.addedManually, true);
+  assert.equal(first.doublePositive, true);
+  assert.equal(outside.regionName, '未分区');
+  const summaries = summarizeIf([first, interstitium, outside], regions, 10, 8);
+  assert.deepEqual(summaries.map(region => [region.total, region.aPositive, region.bPositive, region.doublePositive]), [[1, 1, 0, 0], [1, 1, 1, 1], [0, 0, 0, 0]]);
+  assert.equal(summarizeIf([{ ...first, excluded: true }, interstitium], regions, 10, 8)[1].total, 0);
+  assert.equal(summarizeIf([{ ...first, bPositive: false }], regions, 10, 8)[1].doublePositive, 0);
+  assert.equal(addManualIfCell([{ ...first, id: 9, excluded: true }], { x: 2, y: 2 }, [], 10, 8).id, 10);
+  assert.equal(addManualIfCell([], { x: 2, y: 2 }, [], 10, 8).regionName, '全图');
+  for (const point of [{ x: NaN, y: 0 }, { x: 0, y: Infinity }, { x: -1, y: 0 }, { x: 10, y: 0 }, { x: 0, y: 8 }]) {
+    assert.throws(() => addManualIfCell([], point, [], 10, 8), /图像内/);
+  }
 });

@@ -9,10 +9,11 @@ export interface Parameters {
   radius: number; minPositiveFraction: number;
 }
 export interface Cell {
-  id: number; x: number; y: number; area: number;
+  id: number; x: number; y: number; area: number | null;
   regionId: string | null; regionName: string;
-  aMean: number; bMean: number; aFraction: number; bFraction: number; overlapFraction: number;
+  aMean: number | null; bMean: number | null; aFraction: number | null; bFraction: number | null; overlapFraction: number | null;
   aPositive: boolean; bPositive: boolean; doublePositive: boolean; excluded: boolean; manual: boolean;
+  addedManually?: boolean;
 }
 export interface RegionSummary {
   id: string; name: string; areaPx: number; total: number;
@@ -151,6 +152,22 @@ function summarize(cells: Cell[], regions: Region[], width: number, height: numb
 export function summarizeIf(cells: Cell[], regions: Region[], width: number, height: number): RegionSummary[] {
   validateRegions(regions, width, height);
   return summarize(cells, regions, width, height).summaries;
+}
+
+/** A reviewed point counts as a cell but does not invent segmentation measurements. */
+export function addManualIfCell(cells: Cell[], point: Point, regions: Region[], width: number, height: number,
+  aPositive = false, bPositive = false): Cell {
+  validateRegions(regions, width, height);
+  if (!Number.isFinite(point.x) || !Number.isFinite(point.y) || point.x < 0 || point.y < 0
+    || point.x >= width || point.y >= height) throw new Error('补加位置必须位于图像内。');
+  const id = cells.reduce((highest, cell) => Math.max(highest, cell.id), 0) + 1;
+  if (!Number.isSafeInteger(id) || id < 1) throw new Error('细胞编号无效。');
+  const region = regions.length ? regions[regionIndex(point, regions)] : ALL;
+  return { id, x: point.x, y: point.y, area: null,
+    regionId: region?.id ?? null, regionName: region?.name ?? '未分区',
+    aMean: null, bMean: null, aFraction: null, bFraction: null, overlapFraction: null,
+    aPositive, bPositive, doublePositive: aPositive && bPositive,
+    excluded: false, manual: true, addedManually: true };
 }
 
 export function analyzeIf(nucleus: NumericArray, a: NumericArray, b: NumericArray, width: number, height: number,

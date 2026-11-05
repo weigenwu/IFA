@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type PointerEvent } from 'react';
 import { loadImages, type LoadedImage } from '../lib/image';
-import { summarizeIf, pointInPolygon, type Point, type Region, type Parameters, type Result, type Cell } from '../lib/if-count';
+import { summarizeIf, pointInPolygon, addManualIfCell, type Point, type Region, type Parameters, type Result, type Cell } from '../lib/if-count';
 import { ellipseControls, smoothContour, moveContour, contourBounds, resizeContour } from '../lib/if-region-editor';
 import { groupIfFiles, inferIfChannels, resolveIfChannels, captureIfChannelReference, mapIfChannels, csv } from '../lib/if-count-io';
 import { createStoredZip, safeFilePart, type ExportArchiveEntry } from '../lib/export-archive';
@@ -10,7 +10,7 @@ import './if-count.css';
 
 type Mapping = { nucleus: string; a: string; b: string };
 type Snapshot = { hash: string; width: number; height: number; displayOnly: boolean; format: string; sourceWarnings: string[]; channels: string[]; parameters: Parameters; createdAt: string };
-type Field = { id: string; name: string; files: File[]; regions: Region[]; mapping?: Mapping; result?: Result; snapshot?: Snapshot; reviewed: boolean; error?: string };
+type Field = { id: string; name: string; files: File[]; regions: Region[]; mapping?: Mapping; result?: Result; snapshot?: Snapshot; reviewed: boolean; error?: string; cellHistory?: { cells: Cell[]; reviewed: boolean }[] };
 type Outline = { points: Point[]; controls: Point[] | null };
 type Gesture = { kind: 'ellipse' | 'handle' | 'move' | 'resize' | 'freehand'; start: Point; before: Outline; index: number };
 const defaults: Parameters = { nucleusThreshold: 55, aThreshold: 40, bThreshold: 40, minArea: 35, maxArea: 3000, median: true, excludeEdge: false, radius: 6, minPositiveFraction: 0.04 };
@@ -76,7 +76,7 @@ function renderImage(image: LoadedImage, mapping: Mapping, contrast = true) {
   ctx.putImageData(rgba, 0, 0); return canvas;
 }
 
-function overlay(ctx: CanvasRenderingContext2D, field: Field, width: number, selected?: number, showCells = true) {
+function overlay(ctx: CanvasRenderingContext2D, field: Field, width: number, selected?: number, showCells = true, showDeleted = false) {
   const unit = Math.max(1, width / 800);
   field.regions.forEach((region, index) => {
     if (!region.points.length) return;
@@ -87,10 +87,12 @@ function overlay(ctx: CanvasRenderingContext2D, field: Field, width: number, sel
   });
   if (!showCells) return;
   for (const cell of field.result?.cells ?? []) {
-    const radius = Math.max(3 * unit, Math.sqrt(cell.area / Math.PI) + unit);
+    if (cell.excluded && !showDeleted) continue;
+    const radius = cell.area === null ? 5 * unit : Math.max(3 * unit, Math.sqrt(cell.area / Math.PI) + unit);
     ctx.strokeStyle = cell.excluded ? '#ff584e' : cell.doublePositive ? '#ffff80' : cell.aPositive ? '#ff79f4' : cell.bPositive ? '#6bff99' : '#7b9ed3';
     ctx.lineWidth = (cell.id === selected ? 2.5 : 0.8) * unit;
     ctx.beginPath(); ctx.arc(cell.x, cell.y, radius, 0, Math.PI * 2); ctx.stroke();
+    if (cell.addedManually && !cell.excluded) { ctx.beginPath(); ctx.moveTo(cell.x - 2 * unit, cell.y); ctx.lineTo(cell.x + 2 * unit, cell.y); ctx.moveTo(cell.x, cell.y - 2 * unit); ctx.lineTo(cell.x, cell.y + 2 * unit); ctx.stroke(); }
     if (cell.excluded) { ctx.beginPath(); ctx.moveTo(cell.x - radius, cell.y - radius); ctx.lineTo(cell.x + radius, cell.y + radius); ctx.stroke(); }
   }
 }
@@ -102,8 +104,8 @@ function summaryCsv(fields: Field[]) {
 }
 
 function cellsCsv(fields: Field[]) {
-  const rows: (string | number | boolean | null)[][] = [['图像', '细胞ID', '区域', 'X_px', 'Y_px', '核面积_px2', 'AF647均值', 'GFP均值', 'AF647阳性像素比例', 'GFP阳性像素比例', '双阈值重叠像素比例', 'AF647阳性', 'GFP阳性', '双阳性', '排除', '手动修正', '已复核', 'RGB估算', '源SHA256', '最近运行错误_有值则保留旧结果']];
-  for (const f of fields) if (f.result && f.snapshot) for (const c of f.result.cells) rows.push([f.name, c.id, c.regionName, c.x, c.y, c.area, c.aMean, c.bMean, c.aFraction, c.bFraction, c.overlapFraction, c.aPositive, c.bPositive, c.doublePositive, c.excluded, c.manual, f.reviewed, f.snapshot.displayOnly, f.snapshot.hash, f.error ?? '']);
+  const rows: (string | number | boolean | null)[][] = [['图像', '细胞ID', '区域', 'X_px', 'Y_px', '核面积_px2', 'AF647均值', 'GFP均值', 'AF647阳性像素比例', 'GFP阳性像素比例', '双阈值重叠像素比例', 'AF647阳性', 'GFP阳性', '双阳性', '排除', '手动修正', '已复核', 'RGB估算', '源SHA256', '最近运行错误_有值则保留旧结果', '手动补加']];
+  for (const f of fields) if (f.result && f.snapshot) for (const c of f.result.cells) rows.push([f.name, c.id, c.regionName, c.x, c.y, c.area, c.aMean, c.bMean, c.aFraction, c.bFraction, c.overlapFraction, c.aPositive, c.bPositive, c.doublePositive, c.excluded, c.manual, f.reviewed, f.snapshot.displayOnly, f.snapshot.hash, f.error ?? '', !!c.addedManually]);
   return csv(rows);
 }
 
@@ -127,6 +129,9 @@ export default function IfCountAnalyzer() {
   const [regionName, setRegionName] = useState('神经束内 1');
   const [regionKind, setRegionKind] = useState<'region' | 'tissue'>('region');
   const [selectedCell, setSelectedCell] = useState<number>();
+  const [cellMode, setCellMode] = useState<'select' | 'add' | 'delete'>('select');
+  const [addType, setAddType] = useState('dapi');
+  const [showDeleted, setShowDeleted] = useState(false);
   const [showCells, setShowCells] = useState(true);
   const [displayContrast, setDisplayContrast] = useState(true);
   const [zoom, setZoom] = useState(100);
@@ -149,7 +154,7 @@ export default function IfCountAnalyzer() {
     if (!c || !image || !original || !active) return;
     c.width = image.width; c.height = image.height;
     const ctx = c.getContext('2d')!; ctx.drawImage(original, 0, 0);
-    overlay(ctx, { ...active, regions: active.regions.filter(r => r.id !== editingId) }, image.width, selectedCell, showCells);
+    overlay(ctx, { ...active, regions: active.regions.filter(r => r.id !== editingId) }, image.width, selectedCell, showCells, showDeleted);
     if (draft.length) {
       const unit = image.width / (c.getBoundingClientRect().width || image.width);
       const handles = controls ?? (editingId ? draft : []);
@@ -167,7 +172,7 @@ export default function IfCountAnalyzer() {
         ctx.beginPath(); ctx.arc(p.x, p.y, 4 * unit, 0, Math.PI * 2); ctx.fillStyle = '#fff'; ctx.fill(); ctx.strokeStyle = '#1b8067'; ctx.lineWidth = unit; ctx.stroke();
       }
     }
-  }, [image, mapping, active, draft, controls, editingId, selectedCell, showCells, displayContrast, zoom]);
+  }, [image, mapping, active, draft, controls, editingId, selectedCell, showCells, showDeleted, displayContrast, zoom]);
 
   function setOutline(outline: Outline) {
     draftRef.current = outline.points; controlsRef.current = outline.controls;
@@ -181,6 +186,7 @@ export default function IfCountAnalyzer() {
   }
 
   function beginRegion(mode: 'ellipse' | 'freehand', region?: Region) {
+    setCellMode('select');
     setDrawMode(mode); setDraw(true); setEditingId(region?.id); setHistory([]); setSelectedCell(undefined); setError(''); setDownload(null); gesture.current = null;
     setOutline({ points: region?.points ?? [], controls: region?.controlPoints ?? null });
     if (region) { setRegionName(region.name); setRegionKind(region.kind); }
@@ -188,12 +194,12 @@ export default function IfCountAnalyzer() {
 
   function updateField(id: string, patch: Partial<Field>) {
     setDownload(null);
-    setFields(old => old.map(f => f.id === id ? { ...f, ...patch } : f));
+    setFields(old => old.map(f => f.id === id ? { ...f, ...patch, ...('result' in patch && !patch.result ? { cellHistory: [] } : {}) } : f));
   }
 
   async function selectField(field: Field) {
     const sequence = ++loadSequence.current;
-    setActiveId(field.id); setLoaded(null); setSelectedCell(undefined); cancelRegion();
+    setActiveId(field.id); setLoaded(null); setSelectedCell(undefined); setCellMode('select'); cancelRegion();
     setRegionName(`神经束内 ${field.regions.filter(r => r.kind === 'region').length + 1}`);
     setLoading(true); setError('');
     try {
@@ -246,7 +252,7 @@ export default function IfCountAnalyzer() {
           const result = await workerAnalysis(input, selected, native, f.regions);
           result.warnings = [...new Set([...input.warnings, ...result.warnings])];
           const snapshot: Snapshot = { hash: input.hash, width: input.width, height: input.height, displayOnly: input.displayOnly, format: input.format, sourceWarnings: input.warnings, channels: resolveIfChannels(input, selected).map(c => c.label), parameters: native, createdAt: new Date().toISOString() };
-          updateField(f.id, { result, snapshot, mapping: selected, reviewed: false, error: undefined }); success++;
+          updateField(f.id, { result, snapshot, mapping: selected, reviewed: false, error: undefined, cellHistory: [] }); setSelectedCell(undefined); success++;
         } catch (problem) { updateField(f.id, { error: messageOf(problem) }); failed++; }
       }
       setStatus(`${stop.current ? '已停止' : '计算完成'} · 成功 ${success}，失败 ${failed}${all ? '；已复核及手动修正结果保留' : ''}`);
@@ -278,7 +284,7 @@ export default function IfCountAnalyzer() {
   }
 
   function startPointer(event: PointerEvent<HTMLCanvasElement>) {
-    if (busy || !image || event.button !== 0 || gesture.current) return;
+    if (busy || loading || !image || event.button !== 0 || gesture.current) return;
     const p = point(event);
     if (draw) {
       const before = { points: draftRef.current, controls: controlsRef.current };
@@ -295,10 +301,21 @@ export default function IfCountAnalyzer() {
       event.currentTarget.setPointerCapture(event.pointerId);
       gesture.current = { kind, start: p, before, index }; setError('');
       if (kind === 'freehand') setOutline({ points: [...before.points, p], controls: null });
-    } else if (active?.result) {
+    } else if (active?.result && showCells) {
       let best: Cell | undefined, distance = Infinity;
-      for (const c of active.result.cells) { const d = Math.hypot(p.x - c.x, p.y - c.y); if (d < distance) { distance = d; best = c; } }
-      setSelectedCell(distance < Math.max(20, image.width / 45) ? best?.id : undefined);
+      const unit = image.width / event.currentTarget.getBoundingClientRect().width;
+      for (const c of active.result.cells) { if (c.excluded && (!showDeleted || cellMode !== 'select')) continue; const d = Math.hypot(p.x - c.x, p.y - c.y); if (d < distance) { distance = d; best = c; } }
+      if (cellMode === 'add') {
+        if (best && distance <= Math.max(1, 3 * unit)) { setSelectedCell(best.id); setStatus('此处已有标记，可选中后修改。'); return; }
+        try {
+          const added = addManualIfCell(active.result.cells, p, active.regions, image.width, image.height, addType === 'a' || addType === 'double', addType === 'b' || addType === 'double');
+          commitCells([...active.result.cells, added]); setSelectedCell(added.id); setStatus(`已补加细胞 #${added.id} · ${added.regionName}`);
+        } catch (problem) { setError(messageOf(problem)); }
+      } else {
+        const hit = distance <= Math.max(4, 10 * unit) ? best : undefined;
+        setSelectedCell(hit?.id);
+        if (cellMode === 'delete' && hit) { editCell({ excluded: true }, hit.id); setSelectedCell(undefined); setStatus(`已删除标记 #${hit.id}，可撤销。`); }
+      }
     }
   }
 
@@ -337,11 +354,25 @@ export default function IfCountAnalyzer() {
     if (previous) { setOutline(previous); setHistory(history.slice(0, -1)); setError(''); }
   }
 
-  function editCell(patch: Partial<Cell>) {
-    if (!active?.result || !active.snapshot || !cell) return;
-    const cells = active.result.cells.map(c => c.id === cell.id ? { ...c, ...patch, manual: true } : c).map(c => ({ ...c, doublePositive: c.aPositive && c.bPositive }));
+  function commitCells(cells: Cell[]) {
+    if (!active?.result || !active.snapshot || busy || draw) return;
     const regions = summarizeIf(cells, active.regions, active.snapshot.width, active.snapshot.height);
-    updateField(active.id, { result: { ...active.result, cells, regions }, reviewed: false });
+    updateField(active.id, { result: { ...active.result, cells, regions }, reviewed: false, cellHistory: [...(active.cellHistory ?? []).slice(-29), { cells: active.result.cells, reviewed: active.reviewed }] });
+    setError('');
+  }
+
+  function editCell(patch: Partial<Pick<Cell, 'aPositive' | 'bPositive' | 'excluded'>>, id = selectedCell) {
+    if (!active?.result || id === undefined) return;
+    const cells = active.result.cells.map(c => { if (c.id !== id) return c; const changed = { ...c, ...patch, manual: true }; return { ...changed, doublePositive: changed.aPositive && changed.bPositive }; });
+    commitCells(cells);
+  }
+
+  function undoCells() {
+    const previous = active?.cellHistory?.at(-1);
+    if (!active?.result || !active.snapshot || !previous || busy || draw) return;
+    const regions = summarizeIf(previous.cells, active.regions, active.snapshot.width, active.snapshot.height);
+    updateField(active.id, { result: { ...active.result, cells: previous.cells, regions }, reviewed: previous.reviewed, cellHistory: active.cellHistory!.slice(0, -1) });
+    setSelectedCell(undefined); setError(''); setStatus('已撤销上一步细胞修正。');
   }
 
   function offer(name: string, blob: Blob) {
@@ -389,7 +420,7 @@ export default function IfCountAnalyzer() {
             <input ref={channelsInput} type="file" hidden multiple accept=".tif,.tiff,.png,.jpg,.jpeg" onChange={e => { void importFiles(e.target.files, true); e.target.value = ''; }} />
             <button className="if-text" disabled={busy || loading || draw} onClick={() => channelsInput.current?.click()}>组合单通道文件</button>
             <div className="if-files">{fields.map((f, i) => <button key={f.id} aria-pressed={f.id === activeId} disabled={busy || loading || draw} title={f.name} onClick={() => void selectField(f)}><span>{i + 1}. {f.name}</span><small>{f.error ? '失败' : f.reviewed ? '已复核' : f.result ? '待复核' : '未计算'}</small></button>)}</div>
-            <div className="if-actions"><button className="primary" disabled={!image || busy || loading || draw} onClick={() => void run(false)}>计算此图</button><button disabled={!image || busy || loading || draw} onClick={() => void run(true)}>计算全部</button>{running && <button onClick={() => { stop.current = true; setStatus('将在当前切片完成后停止'); }}>停止</button>}</div>
+            <div className="if-actions"><button className="primary" disabled={!image || busy || loading || draw} onClick={() => void run(false)}>{active?.result?.cells.some(c => c.manual) ? '重新计算（替换修正）' : '计算此图'}</button><button disabled={!image || busy || loading || draw} onClick={() => void run(true)}>计算全部</button>{running && <button onClick={() => { stop.current = true; setStatus('将在当前切片完成后停止'); }}>停止</button>}</div>
             <p className="if-hint" role="status">{status || '先圈区域，再统计细胞。未圈区域时统计全图。'}</p>
             {active?.error && <p className="if-error">{active.error}{active.result ? '（上次成功结果仍保留，导出会注明本次失败）' : ''}</p>}
             {download && <a className="if-download" href={download.url} download={download.name}>下载文件 · {download.name}</a>}
@@ -412,13 +443,19 @@ export default function IfCountAnalyzer() {
         </aside>
         <section className="if-results">
           <div className="if-card if-view"><div className="if-viewbar"><strong>{loading ? '读取中…' : active?.name ?? '图像预览'}</strong>{image && !image.displayOnly && <label className="if-check" title="仅改变预览和标记图亮度，计数使用原始信号"><input type="checkbox" disabled={busy} checked={displayContrast} onChange={e => { setDisplayContrast(e.target.checked); setDownload(null); }} />增强显示</label>}<label className="if-check"><input type="checkbox" checked={showCells} onChange={e => setShowCells(e.target.checked)} />细胞标记</label><label className="if-zoom">缩放<select aria-label="预览缩放" value={zoom} onChange={e => setZoom(Number(e.target.value))}><option value="100">适应</option><option value="150">150%</option><option value="250">250%</option><option value="400">400%</option></select></label></div>
-            {image ? <div className="if-canvas-scroll"><canvas aria-label="切片图像与区域描边" ref={canvas} style={{ width: zoom === 100 ? 'auto' : `${zoom}%`, maxWidth: zoom === 100 ? '100%' : 'none', maxHeight: zoom === 100 ? 'min(65vh, 650px)' : 'none', margin: '0 auto', cursor: draw ? 'crosshair' : 'pointer' }} onPointerDown={startPointer} onPointerMove={movePointer} onPointerUp={event => endPointer(event)} onPointerCancel={event => endPointer(event, true)} onLostPointerCapture={event => endPointer(event, true)} /></div> : <div className="if-empty"><span>◉</span><h3>按区域，数清每一种细胞</h3><p>DAPI · AF647 · GFP</p></div>}
+            {active?.result && <div className="if-reviewbar" role="group" aria-label="细胞复核工具">
+              {([['select', '选中'], ['add', '补加细胞'], ['delete', '删除标记']] as const).map(([mode, label]) => <button key={mode} className={cellMode === mode ? 'primary' : ''} aria-pressed={cellMode === mode} disabled={busy || loading || draw} onClick={() => { setCellMode(mode); setShowCells(true); setSelectedCell(undefined); }}>{label}</button>)}
+              {cellMode === 'add' && <select aria-label="补点类型" disabled={busy || draw} value={addType} onChange={e => setAddType(e.target.value)}><option value="dapi">仅 DAPI</option><option value="a">AF647 阳性</option><option value="b">GFP 阳性</option><option value="double">AF647 / GFP 双阳性</option></select>}
+              <button disabled={busy || loading || draw || !active.cellHistory?.length} onClick={undoCells}>撤销修正</button>
+              <label className="if-check"><input type="checkbox" checked={showDeleted} disabled={busy || draw} onChange={e => { setShowDeleted(e.target.checked); setShowCells(true); setSelectedCell(undefined); }} />显示已删除</label>
+            </div>}
+            {image ? <div className="if-canvas-scroll"><canvas aria-label="切片图像与区域描边" ref={canvas} style={{ width: zoom === 100 ? 'auto' : `${zoom}%`, maxWidth: zoom === 100 ? '100%' : 'none', maxHeight: zoom === 100 ? 'min(65vh, 650px)' : 'none', margin: '0 auto', cursor: draw || cellMode === 'add' ? 'crosshair' : 'pointer' }} onPointerDown={startPointer} onPointerMove={movePointer} onPointerUp={event => endPointer(event)} onPointerCancel={event => endPointer(event, true)} onLostPointerCapture={event => endPointer(event, true)} /></div> : <div className="if-empty"><span>◉</span><h3>按区域，数清每一种细胞</h3><p>DAPI · AF647 · GFP</p></div>}
             {image && <div className="if-legend"><span>● DAPI 核</span><span>● AF647 阳性</span><span>● GFP 阳性</span><span>● 双阳性</span>{image.displayOnly && <em>RGB 估算</em>}</div>}
           </div>
-          {cell && <div className="if-card if-cell"><strong>细胞 #{cell.id}</strong><span>{cell.regionName} · 核面积 {cell.area} px²</span><label className="if-check"><input type="checkbox" disabled={busy} checked={cell.aPositive} onChange={e => editCell({ aPositive: e.target.checked })} />AF647+</label><label className="if-check"><input type="checkbox" disabled={busy} checked={cell.bPositive} onChange={e => editCell({ bPositive: e.target.checked })} />GFP+</label><label className="if-check"><input type="checkbox" disabled={busy} checked={cell.excluded} onChange={e => editCell({ excluded: e.target.checked })} />排除</label></div>}
+          {cell && <div className="if-card if-cell"><strong>细胞 #{cell.id}</strong><span>{cell.regionName} · {cell.addedManually ? '手动补点' : `核面积 ${cell.area} px²`}{cell.excluded ? ' · 已删除' : ''}</span><label className="if-check"><input type="checkbox" disabled={busy || draw || cell.excluded} checked={cell.aPositive} onChange={e => editCell({ aPositive: e.target.checked })} />AF647+</label><label className="if-check"><input type="checkbox" disabled={busy || draw || cell.excluded} checked={cell.bPositive} onChange={e => editCell({ bPositive: e.target.checked })} />GFP+</label><button disabled={busy || draw} onClick={() => { editCell({ excluded: !cell.excluded }); if (!cell.excluded && !showDeleted) setSelectedCell(undefined); }}>{cell.excluded ? '恢复此标记' : '删除此标记'}</button></div>}
           <div className="if-card if-summary"><div className="if-section-head"><h2>分区结果</h2>{active?.result && <label className="if-check"><input type="checkbox" disabled={busy || draw} checked={active.reviewed} onChange={e => updateField(active.id, { reviewed: e.target.checked })} />已人工复核</label>}</div>
             <div className="if-table"><table><thead><tr><th>区域</th><th>总核数</th><th>AF647+</th><th>GFP+</th><th>双阳性</th><th>双阳性 / AF647+</th></tr></thead><tbody>{active?.result?.regions.map(r => <tr key={r.id}><td>{r.name}</td><td>{r.total}</td><td>{r.aPositive}</td><td>{r.bPositive}</td><td>{r.doublePositive}</td><td>{n(r.doubleOfAPct)}{r.doubleOfAPct === null ? '' : '%'}</td></tr>)}</tbody></table></div>
-            <p className="if-hint">{active?.result ? '点击图中细胞可修正阳性或排除；双阳性指同一核关联区域内两种标记均阳性。' : '完成描边后点“计算此图”，或统一参数计算全部。'}</p>
+            <p className="if-hint">{active?.result ? '选“补加细胞”或“删除标记”后点击图像；分区计数与导出同步更新。' : '完成描边后点“计算此图”，或统一参数计算全部。'}</p>
             {active?.result?.regions.some(r => r.total >= 10 && (r.aPositive / r.total > .95 || r.bPositive / r.total > .95)) && <p className="if-error">有区域接近全阳性，请结合阴性对照核对背景与阈值。</p>}
             {!!active?.result?.warnings.length && <details className="if-qc"><summary>检查提示 · {active.result.warnings.length}</summary>{active.result.warnings.map((w, i) => <p key={i}>{w}</p>)}</details>}
           </div>
