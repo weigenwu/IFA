@@ -161,3 +161,10 @@ footer { height:56px; padding:0 clamp(20px,4vw,64px); display:flex; align-items:
 @media(max-width:520px){
   h1{font-size:36px}.portal-intro h1{font-size:42px}.privacy-badge{font-size:0;padding:9px}.privacy-badge i{margin:0}.tool-card{padding:24px;min-height:220px}.tool-card h2{margin-top:52px}.tool-glyph,.line-glyph{left:24px;right:auto;top:46px}.control-panel{display:block}.field-group{display:block}.canvas-area{min-height:310px}.view-switch button{font-size:8px;padding:6px}.stage-toolbar>span{display:none}.stage-tools{gap:2px}.stage-tools button{padding:6px 5px}.tool-spacer{display:none}.scatter-card canvas,.profile-card canvas{height:230px}.result-card>header{align-items:flex-start;flex-direction:column}.profile-controls{width:100%}footer span{max-width:200px}
 }
+
+/* The CIC editor shares import and display controls; square ROI state stays separate. */
+.intensity-mode-switch{max-width:1500px;margin:0 auto;padding:0 clamp(20px,4vw,64px) 16px;display:flex;gap:8px;flex-wrap:wrap}
+.intensity-mode-switch button{padding:10px 18px;border:1px solid var(--line);border-radius:8px;color:var(--ink);background:var(--panel);font-size:14px}
+.intensity-mode-switch button.active{border-color:#167f83;background:#e6f5f3;color:#0b575a;font-weight:700}
+.cic-panel-host{grid-column:2/-1;min-width:0;border:1px solid var(--line);border-radius:0 18px 18px 0;background:var(--panel)}
+@media(max-width:900px){.cic-panel-host{border-radius:14px}.intensity-mode-switch{padding-left:12px;padding-right:12px}}

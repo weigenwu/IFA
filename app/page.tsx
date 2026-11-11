@@ -26,7 +26,7 @@ export default function Home() {
           <span className="tool-index">02 · INTENSITY & LINE SCAN</span>
           <div className="line-glyph" aria-hidden="true"><i /><i /><i /><i /><i /></div>
           <h2>荧光强度</h2>
-          <p>多通道伪彩、背景、ROI 强度与裁图。</p>
+          <p>ROI 强度、CIC 内外细胞配对、线扫描与裁图。</p>
           <strong>打开 <span>→</span></strong>
         </a>
         <a className="tool-card intensity-tool" href="./edu/">

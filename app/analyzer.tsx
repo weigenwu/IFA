@@ -25,6 +25,7 @@ import { createStoredZip, safeFilePart } from '../lib/export-archive';
 import { saveFile, type PreparedDownload } from '../lib/save-file';
 import { nextEnabledChannel } from '../lib/channel-navigation';
 import ExportLocation from './export-location';
+import CicPairPanel from './cic-pair-panel';
 import { encodePseudocolorTiff, renderRoiPseudocolor, renderedRoiToBlob, resolveDisplayRange, resolveRulerPixelSize } from '../lib/roi-export';
 
 type Tool = 'roi' | 'background' | 'line';
@@ -162,6 +163,8 @@ function normalizedRect(rect: Rect | null) {
 
 export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   const isColoc = mode === 'colocalization';
+  const [intensityMode, setIntensityMode] = useState<'initial' | 'roi' | 'cic'>('initial');
+  const cicMode = intensityMode === 'cic';
   const [image, setImage] = useState<LoadedImage | null>(null);
   const [channelAId, setChannelAId] = useState('green');
   const [channelBId, setChannelBId] = useState('red');
@@ -222,6 +225,13 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     const channel = image?.channels.find(candidate => candidate.id === setting.id);
     return channel ? [{ setting, channel }] : [];
   }), [image, channelSettings]);
+  const cicDisplayChannels = useMemo(() => intensityChannels.map(({ channel, setting }) => ({
+    id: channel.id,
+    label: setting.label || channel.label,
+    color: PSEUDOCOLORS[setting.color].rgb,
+    displayMin: setting.displayMin,
+    displayMax: setting.displayMax,
+  })), [intensityChannels]);
   const channelASetting = channelSettings.find(setting => setting.id === channelA?.id);
   const channelBSetting = channelSettings.find(setting => setting.id === channelB?.id);
   const displayColorA = channelASetting?.color ?? 'green';
@@ -291,7 +301,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     setLoading(true); setError(''); setAnalysis(null); setDownloadReady(null);
     try {
       const loaded = await loadImages(selected);
-      const previousCrop = !isColoc && keepCropOnLoad ? roi : null;
+      const previousCrop = !isColoc && !cicMode && keepCropOnLoad ? roi : null;
       const retainedCrop = previousCrop ? positionPixelRoi(loaded.width, loaded.height, previousCrop, previousCrop.x, previousCrop.y) : null;
       if (previousCrop && !retainedCrop) {
         setError(`新图片 ${loaded.width} × ${loaded.height} px 放不下原裁剪框，未切换图片。请调整坐标或边长，或取消“换图保留位置和边长”后重试。`);
@@ -317,11 +327,11 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       setImage(null);
       setError(problem instanceof Error ? problem.message : '无法读取该图像。');
     } finally { setLoading(false); }
-  }, [isColoc, keepCropOnLoad, roi, squareSizeLocked, image]);
+  }, [isColoc, cicMode, keepCropOnLoad, roi, squareSizeLocked, image]);
 
   useEffect(() => {
     const canvas = imageCanvas.current;
-    if (!canvas || !image || !channelA || !channelB) return;
+    if (cicMode || !canvas || !image || !channelA || !channelB) return;
     canvas.width = previewSize.width; canvas.height = previewSize.height;
     const context = canvas.getContext('2d');
     if (!context) return;
@@ -356,7 +366,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       }
     }
     context.putImageData(pixels, 0, 0);
-  }, [image, channelA, channelB, channelASetting, channelBSetting, previewSize, view, analysis, background.a, background.b, displayColorA, displayColorB, isColoc, intensityChannels, displayBlackPoint, suppressDisplayBackground, displayBackgroundByChannel]);
+  }, [cicMode, image, channelA, channelB, channelASetting, channelBSetting, previewSize, view, analysis, background.a, background.b, displayColorA, displayColorB, isColoc, intensityChannels, displayBlackPoint, suppressDisplayBackground, displayBackgroundByChannel]);
 
   useEffect(() => {
     const canvas = overlayCanvas.current;
@@ -871,7 +881,12 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
         <div><p className="eyebrow">{isColoc ? 'COLOCALIZATION' : 'INTENSITY'}</p><h1>{isColoc ? '荧光共定位分析' : '荧光强度分析'}</h1></div>
       </section>
 
-      <section className="workspace" id="workspace" aria-label={isColoc ? '荧光共定位工作台' : '荧光强度工作台'}>
+      {!isColoc && <div className="intensity-mode-switch" aria-label="强度分析模式">
+        <button type="button" aria-pressed={!cicMode} className={!cicMode ? 'active' : ''} onClick={() => { if (cicMode) setIntensityMode('roi'); }}>普通 ROI / 线扫描</button>
+        <button type="button" aria-pressed={cicMode} className={cicMode ? 'active' : ''} onClick={() => setIntensityMode('cic')}>CIC 内外细胞配对</button>
+      </div>}
+
+      <section className={`workspace ${cicMode ? 'cic-workspace' : ''}`} id="workspace" aria-label={isColoc ? '荧光共定位工作台' : '荧光强度工作台'}>
         <aside className="control-panel">
           <div className="panel-heading"><span>输入与参数</span><small>{isColoc ? 'COLOC' : 'INTENSITY'}</small></div>
           <div className={`dropzone ${draggingFile ? 'dragging' : ''}`} role="button" tabIndex={0} onClick={() => fileInput.current?.click()} onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') fileInput.current?.click(); }} onDragOver={event => { event.preventDefault(); setDraggingFile(true); }} onDragLeave={() => setDraggingFile(false)} onDrop={event => { event.preventDefault(); setDraggingFile(false); void load(event.dataTransfer.files); }}>
@@ -898,7 +913,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
 
           {activeDisplaySetting && activeDisplayChannel && histogram && <div className="field-group display-window">
             <p>显示范围</p>
-            <label className="wide-field">通道<select value={activeDisplaySetting.id} onChange={event => { if (isColoc) setDisplayChannelId(event.target.value); else selectIntensityView(`channel:${event.target.value}`); }}>{displaySettings.map(setting => <option key={setting.id} value={setting.id}>{setting.label}</option>)}</select></label>
+            <label className="wide-field">通道<select value={activeDisplaySetting.id} onChange={event => { if (isColoc || cicMode) setDisplayChannelId(event.target.value); else selectIntensityView(`channel:${event.target.value}`); }}>{displaySettings.map(setting => <option key={setting.id} value={setting.id}>{setting.label}</option>)}</select></label>
             <div className="display-histogram-control">
               <svg className="display-histogram" viewBox="0 0 100 32" preserveAspectRatio="none" aria-label={`${activeDisplaySetting.label} 强度直方图`}>
                 <polygon points={histogram.points} />
@@ -919,31 +934,31 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
                 }} />
               </label>
             ))}
-            {!isColoc && <button className="channel-confirm display-next" title={nextDisplaySetting ? `下一通道：${nextDisplaySetting.label}` : '查看所有已勾选通道的合并图'} onClick={() => selectIntensityView(nextDisplaySetting ? `channel:${nextDisplaySetting.id}` : 'merge')}>{nextDisplaySetting ? '完成 → 下一通道' : '完成 → 查看 Merge'}</button>}
-            <label className="display-slider-field">
+            {!isColoc && !cicMode && <button className="channel-confirm display-next" title={nextDisplaySetting ? `下一通道：${nextDisplaySetting.label}` : '查看所有已勾选通道的合并图'} onClick={() => selectIntensityView(nextDisplaySetting ? `channel:${nextDisplaySetting.id}` : 'merge')}>{nextDisplaySetting ? '完成 → 下一通道' : '完成 → 查看 Merge'}</button>}
+            {!cicMode && <label className="display-slider-field">
               <span>全通道压背景</span>
               <span className="display-percent"><input aria-label="全通道压背景百分比" type="number" min="0" max="99.9" step="0.1" value={displayBlackPoint} onChange={event => { const value = Number(event.target.value); if (Number.isFinite(value)) setDisplayBlackPoint(Math.min(99.9, Math.max(0, value))); }} />%</span>
               <input aria-label="全通道压背景" type="range" min="0" max="99.9" step="0.1" value={displayBlackPoint} onChange={event => setDisplayBlackPoint(Number(event.target.value))} />
-            </label>
+            </label>}
             <button className="channel-confirm" onClick={resetDisplay}>重置显示</button>
             <small className="field-help">Min 向右压背景，Max 向左提亮；过强会隐藏弱信号。仅影响显示和导图。</small>
           </div>}
 
-          <div className="field-group"><p>显示去杂色</p><label className="scale-toggle"><input type="checkbox" checked={suppressDisplayBackground} disabled={!image || !backgroundRoi} onChange={event => setSuppressDisplayBackground(event.target.checked)} /><span>背景 ROI 均值 + {DISPLAY_BACKGROUND_SD_MULTIPLIER} SD</span></label><small className="field-help">{backgroundRoi ? '仅改变显示和图片导出。' : '先在图中框选背景 ROI。'}</small></div>
+          {!cicMode && <div className="field-group"><p>显示去杂色</p><label className="scale-toggle"><input type="checkbox" checked={suppressDisplayBackground} disabled={!image || !backgroundRoi} onChange={event => setSuppressDisplayBackground(event.target.checked)} /><span>背景 ROI 均值 + {DISPLAY_BACKGROUND_SD_MULTIPLIER} SD</span></label><small className="field-help">{backgroundRoi ? '仅改变显示和图片导出。' : '先在图中框选背景 ROI。'}</small></div>}
 
-          {!isColoc && <>
+          {!isColoc && !cicMode && <>
             <div className="field-group"><p>正方形裁剪与标尺</p>{image && <div className="crop-size-field"><span>实际边长</span>{roiSideInput('裁剪边长')}<select aria-label="裁剪边长单位" value={roiSizeUnit} onChange={event => setRoiSizeUnit(event.target.value as RoiSizeUnit)}><option value="px">px</option><option value="um" disabled={!pixelSize}>µm</option><option value="mm" disabled={!pixelSize}>mm</option><option value="cm" disabled={!pixelSize}>cm</option></select></div>}<label className="scale-toggle"><input type="checkbox" checked={squareSizeLocked} onChange={event => { setSquareSizeLocked(event.target.checked); setRoiResize(null); }} /><span>固定边长（仅移动）</span></label><small className="field-help">{squareSizeLocked ? '已固定；框内拖动可移动位置。' : '拖四角缩放，框内拖动移动；输入实际边长可精确设置。'}</small><label className="number-field"><span>排版比例</span><input aria-label="排版比例分母" type="number" min="1" max="100000" step="100" value={layoutSizeRatio} onChange={event => setLayoutSizeRatio(Math.min(100000, Math.max(1, Math.round(Number(event.target.value) || 1))))} /><span>倍</span></label><small className="field-help">实际 : 排版 = 1 : {layoutSizeRatio}{layoutReferenceCm !== null ? ` → ${format(layoutReferenceCm, 4)} cm` : ''}；仅换算，不改变 ROI、定量或导出像素。</small><label className="number-field"><span>像素尺寸</span><input type="number" min="0" step="0.001" value={pixelSize} onChange={event => { const value = Math.max(0, Number(event.target.value) || 0); setPixelSize(value); if (!value) setRoiSizeUnit('px'); }} /><span>µm/px</span></label>{referenceScaleControls}<label className="scale-toggle"><input type="checkbox" checked={showScaleBar} onChange={event => setShowScaleBar(event.target.checked)} /><span>导出显示比例尺</span></label>{showScaleBar && <label className="number-field"><span>比例尺</span><input type="number" min="0.1" step="0.1" value={scaleBarUm} onChange={event => setScaleBarUm(Math.max(.1, Number(event.target.value) || .1))} /><span>µm</span></label>}</div>
             <div className="field-group"><p>线扫描通道（可选）</p><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorA].css }} />通道 A<select value={channelAId} onChange={event => setChannelAId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{channelSettings.find(setting => setting.id === channel.id)?.label || channel.label}</option>)}</select></label><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorB].css }} />通道 B<select value={channelBId} onChange={event => setChannelBId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{channelSettings.find(setting => setting.id === channel.id)?.label || channel.label}</option>)}</select></label></div>
           </>}
 
           {isColoc && <div className="field-group"><p>阈值</p><label className="wide-field">方法<select value={thresholdMethod} onChange={event => setThresholdMethod(event.target.value as ThresholdMethod)}><option value="costes">Costes 自动</option><option value="otsu">Otsu 自动</option><option value="manual">手动阈值</option><option value="none">零阈值</option></select></label>{thresholdMethod === 'manual' && <div className="range-pair"><label>A {manualA}%<input type="range" min="0" max="100" value={manualA} onChange={event => setManualA(Number(event.target.value))} /></label><label>B {manualB}%<input type="range" min="0" max="100" value={manualB} onChange={event => setManualB(Number(event.target.value))} /></label></div>}</div>}
 
-          <div className="field-group"><p>{isColoc ? '背景与标尺' : '定量扣背景'}</p><label className="wide-field">方法<select value={backgroundMethod} onChange={event => setBackgroundMethod(event.target.value as BackgroundMethod)}><option value="none">不校正</option><option value="roi">背景 ROI 均值</option><option value="percentile">ROI 第 5 百分位</option></select></label>{isColoc && <><label className="number-field"><span>像素尺寸</span><input type="number" min="0" step="0.001" value={pixelSize} onChange={event => setPixelSize(Math.max(0, Number(event.target.value) || 0))} /><span>µm/px</span></label>{referenceScaleControls}<label className="scale-toggle"><input type="checkbox" checked={showScaleBar} onChange={event => setShowScaleBar(event.target.checked)} /><span>导出比例尺</span></label>{showScaleBar && <label className="number-field"><span>比例尺</span><input type="number" min="0.1" step="0.1" value={scaleBarUm} onChange={event => setScaleBarUm(Math.max(.1, Number(event.target.value) || .1))} /><span>µm</span></label>}</>}<small className="field-help">{isColoc ? '背景用于计算，标尺用于导图。' : '用于数值计算，与显示去杂色分开。'}</small></div>
+          {!cicMode && <div className="field-group"><p>{isColoc ? '背景与标尺' : '定量扣背景'}</p><label className="wide-field">方法<select value={backgroundMethod} onChange={event => setBackgroundMethod(event.target.value as BackgroundMethod)}><option value="none">不校正</option><option value="roi">背景 ROI 均值</option><option value="percentile">ROI 第 5 百分位</option></select></label>{isColoc && <><label className="number-field"><span>像素尺寸</span><input type="number" min="0" step="0.001" value={pixelSize} onChange={event => setPixelSize(Math.max(0, Number(event.target.value) || 0))} /><span>µm/px</span></label>{referenceScaleControls}<label className="scale-toggle"><input type="checkbox" checked={showScaleBar} onChange={event => setShowScaleBar(event.target.checked)} /><span>导出比例尺</span></label>{showScaleBar && <label className="number-field"><span>比例尺</span><input type="number" min="0.1" step="0.1" value={scaleBarUm} onChange={event => setScaleBarUm(Math.max(.1, Number(event.target.value) || .1))} /><span>µm</span></label>}</>}<small className="field-help">{isColoc ? '背景用于计算，标尺用于导图。' : '用于数值计算，与显示去杂色分开。'}</small></div>}
           {image?.displayOnly && <label className="risk-confirm"><input type="checkbox" checked={allowDisplayOnly} onChange={event => setAllowDisplayOnly(event.target.checked)} /><span><b>当前是展示图</b>仅在理解伪彩/合并 RGB 风险后进行探索性分析。</span></label>}
           </>}
         </aside>
 
-        <div className="image-stage">
+        <div className="image-stage" style={cicMode ? { display: 'none' } : undefined}>
           <div className="stage-toolbar"><div className="view-switch"><button className={view === 'overlay' ? 'selected' : ''} onClick={() => { if (isColoc) setView('overlay'); else selectIntensityView('merge'); }}>Merge</button>{isColoc ? <><button className={view === 'a' ? 'selected' : ''} onClick={() => setView('a')}>通道 A</button><button className={view === 'b' ? 'selected' : ''} onClick={() => setView('b')}>通道 B</button><button className={view === 'mask' ? 'selected' : ''} onClick={() => setView('mask')} disabled={!analysis?.coloc}>Mask</button></> : intensityChannels.map(({ channel, setting }) => <button key={channel.id} className={view === `channel:${channel.id}` ? 'selected' : ''} onClick={() => selectIntensityView(`channel:${channel.id}`)}><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[setting.color].css }} />{setting.label || channel.label}</button>)}</div><span>显示设置不影响定量</span></div>
           <div className={`canvas-area tool-${tool}`}>
             {!image && <div className="empty-canvas"><div className="scan-grid" /><span className="crosshair" aria-hidden="true" /><p>等待图像</p><small>可直接选择 FV3000 .oir 原始文件</small></div>}
@@ -955,7 +970,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
           <ExportLocation />
         </div>
 
-        <aside className="results-panel">
+        <aside className="results-panel" style={cicMode ? { display: 'none' } : undefined}>
           <div className="panel-heading"><span>即时结果</span><small>{analysis ? 'READY' : 'PREVIEW'}</small></div>
           {isColoc ? <>
             <div className="metric hero-metric"><small>Pearson&apos;s r</small><strong>{analysis?.coloc ? format(analysis.coloc.pearson) : '—'}</strong><span>强度线性相关</span></div>
@@ -977,9 +992,14 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
           <button className="analyze-button" onClick={runAnalysis} disabled={!image || !channelConfirmed || busy || loading || Boolean(image?.displayOnly && !allowDisplayOnly)}>{busy ? '正在计算…' : image && !channelConfirmed ? '先确认通道' : image ? `运行${isColoc ? '共定位' : '强度'}分析` : '载入图像后分析'} <span>→</span></button>
           <p className="run-note">{isColoc ? `${thresholdLabels[thresholdMethod]} · ` : ''}{backgroundLabels[backgroundMethod]}</p>
         </aside>
+        {!isColoc && intensityMode !== 'initial' && <div className="cic-panel-host" style={{ display: cicMode ? 'block' : 'none' }}>
+          {error && <p className="error-message" role="alert">{error}</p>}
+          <CicPairPanel image={image} channelConfirmed={channelConfirmed && !loading} allowDisplayOnly={allowDisplayOnly}
+            displayChannels={cicDisplayChannels} />
+        </div>}
       </section>
 
-      <section className="detail-section" id="results">
+      <section className="detail-section" id="results" style={cicMode ? { display: 'none' } : undefined}>
         <div className="section-title"><h2>{isColoc ? '共定位结果' : '强度结果'}</h2>{analysis && <div className="export-actions"><button disabled={!channelConfirmed} onClick={exportRows}>指标 CSV</button><button disabled={!channelConfirmed} onClick={exportJson}>完整 JSON</button>{analysis.profile && <button disabled={!channelConfirmed} onClick={exportProfile}>线扫 CSV</button>}</div>}</div>
 
         {isColoc && <div className="result-grid">
