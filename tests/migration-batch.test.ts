@@ -37,3 +37,23 @@ test('CSV retains errors, missing measurements, corrections and safe filenames',
   assert.ok(!empty.includes('NaN'));
   assert.ok(empty.includes('当前面积无效'));
 });
+
+test('resampled measurements need field confirmation and export original dimensions', () => {
+  const baseline = row('sh-NC/左下线_0H.tif', 100);
+  const original = { ...row('sh-NC/左下线_48H.tif', 160), width: 2448, height: 2048 };
+  assert.equal(scratchClosure(original, [baseline]).closurePct, null);
+  const normalized: MigrationCsvRow = {
+    ...row(original.path, 40), pairConfirmed: true,
+    resolution: { originalWidth: 2448, originalHeight: 2048, width: 1224, height: 1024, baselinePath: baseline.path, confirmedSameField: true, method: 'canvas-high-quality' },
+  };
+  assert.equal(scratchClosure(normalized, [baseline]).closurePct, 60);
+  assert.equal(scratchClosure({ ...normalized, resolution: { ...normalized.resolution!, confirmedSameField: false } }, [baseline]).closurePct, null);
+  assert.equal(scratchClosure(baseline, [{ ...baseline, resolution: { ...normalized.resolution!, confirmedSameField: false } }]).closurePct, null);
+  const csv = makeMigrationCsv('scratch', [baseline, normalized]);
+  assert.ok(csv.includes('"原始宽_px","原始高_px","分辨率处理","统一尺寸基准","同视野确认"'));
+  assert.ok(csv.includes('"2448","2048","统一到0H（高质量重采样）","sh-NC/左下线_0H.tif","是"'));
+  const unconfirmed = { ...normalized, pairConfirmed: false };
+  assert.equal(scratchClosure(unconfirmed, [baseline]).status, '文件名配对待核对');
+  assert.ok(makeMigrationCsv('scratch', [baseline, unconfirmed]).includes('"2448","2048","统一到0H（高质量重采样）","sh-NC/左下线_0H.tif","否"'));
+  assert.ok(!makeMigrationCsv('transwell', [baseline]).includes('分辨率处理'));
+});

@@ -1,3 +1,5 @@
+import type { ScratchResolution } from './scratch-resolution.ts';
+
 export type MigrationMode = 'scratch' | 'transwell';
 
 export interface MigrationCsvRow {
@@ -20,6 +22,7 @@ export interface MigrationCsvRow {
   reviewed: boolean;
   manualEdited: boolean;
   pairConfirmed?: boolean;
+  resolution?: ScratchResolution;
   warnings: string[];
   error?: string;
 }
@@ -48,6 +51,7 @@ export function scratchClosure(row: MigrationCsvRow, rows: MigrationCsvRow[]) {
   const baseline = candidates[0];
   if (baseline.error || baseline.areaPx == null || !Number.isFinite(baseline.areaPx) || baseline.areaPx <= 0) return no('0H面积无效', baseline.path);
   if (!row.width || !row.height || row.width !== baseline.width || row.height !== baseline.height) return no('图像尺寸不一致', baseline.path);
+  if ((row.resolution && !row.resolution.confirmedSameField) || (baseline.resolution && !baseline.resolution.confirmedSameField)) return no('统一分辨率前需确认同一视野', baseline.path);
   if (row.algorithmVersion !== baseline.algorithmVersion) return no('算法版本不一致', baseline.path);
   if (row.paramsJson !== baseline.paramsJson || row.roiTopPct !== baseline.roiTopPct || row.roiBottomPct !== baseline.roiBottomPct) return no('分析参数或ROI不一致', baseline.path);
   return {
@@ -67,7 +71,7 @@ function csvCell(value: unknown) {
 export function makeMigrationCsv(mode: MigrationMode, rows: MigrationCsvRow[]) {
   const common = ['文件路径', '源文件_SHA256', '算法版本', '宽_px', '高_px', '状态', '已复核', '人工修正', '分析参数_JSON', '提示'];
   const columns = mode === 'scratch'
-    ? ['同名视野', '时间_h', '伤口面积_px2', '平均宽度_px', 'ROI上缘_%', 'ROI下缘_%', '0H文件', '闭合率_%', '配对状态']
+    ? ['同名视野', '时间_h', '伤口面积_px2', '平均宽度_px', 'ROI上缘_%', 'ROI下缘_%', '0H文件', '闭合率_%', '配对状态', '原始宽_px', '原始高_px', '分辨率处理', '统一尺寸基准', '同视野确认']
     : ['自动估计数', '修正后估计数', '染色面积_px2', '染色覆盖率_%', '大团块数'];
   const lines = [common.concat(columns).map(csvCell).join(',')];
   for (const row of rows) {
@@ -76,6 +80,9 @@ export function makeMigrationCsv(mode: MigrationMode, rows: MigrationCsvRow[]) {
       const parsed = parseScratchFile(row.path);
       const closure = scratchClosure(row, rows);
       values.push(parsed.series, parsed.timeHours, row.error ? null : row.areaPx, row.error ? null : row.meanWidthPx, row.roiTopPct, row.roiBottomPct, closure.baselinePath, closure.closurePct, closure.status);
+      const resolution = row.resolution;
+      const resized = resolution && (resolution.originalWidth !== resolution.width || resolution.originalHeight !== resolution.height);
+      values.push(resolution?.originalWidth ?? row.width, resolution?.originalHeight ?? row.height, resized ? '统一到0H（高质量重采样）' : '原始尺寸', resolution?.baselinePath, row.pairConfirmed ? '是' : '否');
     } else {
       values.push(...(row.error ? [null, null, null, null, null] : [row.autoCount, row.correctedCount, row.stainedAreaPx, row.coveragePct, row.clusterCount]));
     }

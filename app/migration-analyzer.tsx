@@ -8,6 +8,7 @@ import { makeMigrationCsv, scratchClosure, parseScratchFile, type MigrationCsvRo
 import { DEFAULT_BACKGROUND_SETTINGS, estimateBackground, normalizeBackground, type BackgroundEstimate, type BackgroundSettings } from '../lib/brightfield-display';
 import { moveScratchBoundary, traceScratchSegment, type ScratchSide, type TracePoint } from '../lib/scratch-edit';
 import { scratchDisplayEdges, type ScratchLineType } from '../lib/scratch-display';
+import { resolveScratchBaseline, resizeScratchFrame, type ScratchResolution } from '../lib/scratch-resolution';
 import './migration.css';
 
 type Mode = 'scratch' | 'transwell';
@@ -16,7 +17,7 @@ type Entry = { key: string; path: string; file: File };
 type Point = { x: number; y: number };
 type LineStyle = { color: string; widthPx: number; type: ScratchLineType };
 type ResultRecord = MigrationCsvRow & { key: string; scratch?: ScratchResult; autoScratch?: ScratchResult; points?: Point[]; autoPoints?: Point[]; updatedAt: string; lastRunError?: string };
-type Loaded = { frame: RGBAFrame; hash: string; warnings: string[]; background: BackgroundEstimate };
+type Loaded = { frame: RGBAFrame; hash: string; warnings: string[]; background: BackgroundEstimate; resolution?: ScratchResolution };
 type Progress = { running: boolean; done: number; total: number; failed: number; skipped: number; stopped: boolean; issues: string[] };
 type ScratchStroke = { key: string; hash: string; paramsJson: string; pointerId: number; side: ScratchSide; mode: 'trace' | 'move'; radiusPx: number; start: TracePoint; centerY: number; last: TracePoint; base: ScratchBoundary[]; boundaries: ScratchBoundary[]; before: ResultRecord; beforeDraft: ScratchBoundary[] | null; moved: boolean };
 const SUPPORTED = /\.(png|jpe?g|tiff?|bmp|webp)$/i;
@@ -36,7 +37,7 @@ function imageFrame(image: LoadedImage): RGBAFrame {
   }
   return { width: image.width, height: image.height, data };
 }
-async function readEntry(entry: Entry): Promise<Loaded> {
+async function readEntry(entry: Entry, target?: Pick<ScratchResolution, 'width' | 'height' | 'baselinePath' | 'confirmedSameField'>): Promise<Loaded> {
   const image = await loadImages([entry.file]);
   if (image.warnings.some(warning => warning.includes('Alpha/ExtraSamples'))) throw new Error('TIFF 含 Alpha/额外样本，请先导出不透明单平面 RGB 图。');
   let frame = imageFrame(image);
@@ -53,7 +54,14 @@ async function readEntry(entry: Entry): Promise<Loaded> {
   }
   // Fluorescence-channel warnings do not apply to the intended brightfield RGB input.
   const sourceWarnings = image.warnings.filter(warning => !warning.startsWith('检测到 RGB 合并展示图') && !warning.startsWith('分析使用 TIFF 原始位深'));
-  return { frame, hash: image.hash, background: estimateBackground(frame), warnings: [...sourceWarnings, ...(image.channels.some(channel => channel.bitDepth > 8) ? ['算法按原始满量程映射到 8-bit 明场图；原文件保留。'] : [])] };
+  let resolution: ScratchResolution | undefined;
+  if (target && (frame.width !== target.width || frame.height !== target.height)) {
+    if (!target.confirmedSameField) throw new Error('请先确认同一倍率、同一视野且未裁剪。');
+    resolution = { ...target, originalWidth: frame.width, originalHeight: frame.height, method: 'canvas-high-quality' };
+    frame = resizeScratchFrame(frame, target);
+    sourceWarnings.push(`分辨率统一：${resolution.originalWidth} × ${resolution.originalHeight} → ${frame.width} × ${frame.height} px；原文件保留。`);
+  }
+  return { frame, resolution, hash: image.hash, background: estimateBackground(frame), warnings: [...sourceWarnings, ...(image.channels.some(channel => channel.bitDepth > 8) ? ['算法按原始满量程映射到 8-bit 明场图；原文件保留。'] : [])] };
 }
 function processFrame(mode: Mode, frame: RGBAFrame, parameters: Parameters): Promise<ScratchResult | TranswellResult> {
   return new Promise((resolve, reject) => {
@@ -64,7 +72,7 @@ function processFrame(mode: Mode, frame: RGBAFrame, parameters: Parameters): Pro
   });
 }
 function makeRecord(entry: Entry, loaded: Loaded, parameters: Parameters, result: ScratchResult | TranswellResult, mode: Mode): ResultRecord {
-  const base: ResultRecord = { key: entry.key, path: entry.path, width: loaded.frame.width, height: loaded.frame.height, sourceHash: loaded.hash, algorithmVersion: mode === 'scratch' ? SCRATCH_ALGORITHM_VERSION : 'transwell-v1', paramsJson: JSON.stringify(parameters), reviewed: false, manualEdited: false, pairConfirmed: false, warnings: [...loaded.warnings, ...result.qc], updatedAt: new Date().toISOString() };
+  const base: ResultRecord = { key: entry.key, path: entry.path, width: loaded.frame.width, height: loaded.frame.height, resolution: loaded.resolution, sourceHash: loaded.hash, algorithmVersion: mode === 'scratch' ? SCRATCH_ALGORITHM_VERSION : 'transwell-v1', paramsJson: JSON.stringify(parameters), reviewed: false, manualEdited: false, pairConfirmed: !!loaded.resolution?.confirmedSameField, warnings: [...loaded.warnings, ...result.qc], updatedAt: new Date().toISOString() };
   if (mode === 'scratch') {
     const scratch = result as ScratchResult, params = parameters as ScratchParameters;
     return { ...base, areaPx: scratch.areaPx, meanWidthPx: scratch.meanWidthPx, roiTopPct: params.roiTopPct, roiBottomPct: params.roiBottomPct, scratch, autoScratch: scratch };
@@ -108,6 +116,7 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
   const [parameters, setParameters] = useState<Parameters>(mode === 'scratch' ? DEFAULT_SCRATCH_PARAMETERS : DEFAULT_TRANSWELL_PARAMETERS);
   const [backgroundSettings, setBackgroundSettings] = useState<BackgroundSettings>(DEFAULT_BACKGROUND_SETTINGS);
   const [lineStyle, setLineStyle] = useState<LineStyle>(DEFAULT_LINE_STYLE);
+  const [resolutionConfirmed, setResolutionConfirmed] = useState(false), [replaceReviewed, setReplaceReviewed] = useState(false);
   const [busy, setBusy] = useState(''), [error, setError] = useState(''), [message, setMessage] = useState('');
   const [overlay, setOverlay] = useState(true), [editing, setEditing] = useState(false), [zoom, setZoom] = useState('fit');
   const [scratchDraft, setScratchDraft] = useState<ScratchBoundary[] | null>(null);
@@ -121,20 +130,20 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
   const currentIndex = entries.findIndex(entry => entry.key === activeKey), stale = Boolean(record && (record.paramsJson !== paramsJson || record.algorithmVersion !== currentVersion));
   const exportRows: MigrationCsvRow[] = entries.map(entry => {
     const item = records[entry.key];
-    return item ? { ...item, error: item.error ?? item.lastRunError, status: item.lastRunError ? '本次失败；保留人工结果' : item.error ? '失败' : item.paramsJson !== paramsJson || item.algorithmVersion !== currentVersion ? '参数/算法已改变；保留原结果' : item.reviewed ? '已复核' : item.manualEdited ? '已修正，待复核' : '自动结果，待复核' } : { path: entry.path, paramsJson, algorithmVersion: currentVersion, reviewed: false, manualEdited: false, warnings: [], status: '未处理' };
+    return item ? { ...item, error: item.error ?? item.lastRunError, status: item.lastRunError ? '本次失败；保留原结果' : item.error ? '失败' : item.paramsJson !== paramsJson || item.algorithmVersion !== currentVersion ? '参数/算法已改变；保留原结果' : item.reviewed ? '已复核' : item.manualEdited ? '已修正，待复核' : '自动结果，待复核' } : { path: entry.path, paramsJson, algorithmVersion: currentVersion, reviewed: false, manualEdited: false, warnings: [], status: '未处理' };
   });
   const closure = mode === 'scratch' && record ? scratchClosure(record, exportRows) : null;
   const parsed = active && mode === 'scratch' ? parseScratchFile(active.path) : null;
   const display = useMemo(() => loaded ? normalizeBackground(loaded.frame, backgroundSettings, loaded.background) : null, [loaded, backgroundSettings]);
 
-  function fail(entry: Entry, frozen: Parameters, cause: unknown, source?: Loaded) {
+  function fail(entry: Entry, frozen: Parameters, cause: unknown, source?: Loaded, preserveExisting = false) {
     const reason = cause instanceof Error ? cause.message : String(cause);
     const previous = records[entry.key];
-    if (previous && (previous.manualEdited || previous.reviewed)) {
-      setRecords(old => ({ ...old, [entry.key]: { ...previous, lastRunError: reason, warnings: [...previous.warnings.filter(warning => !warning.startsWith('本次处理失败')), `本次处理失败，保留人工结果：${reason}`], updatedAt: new Date().toISOString() } }));
+    if (previous && (preserveExisting || previous.manualEdited || previous.reviewed)) {
+      setRecords(old => ({ ...old, [entry.key]: { ...previous, lastRunError: reason, warnings: [...previous.warnings.filter(warning => !warning.startsWith('本次处理失败')), `本次处理失败，保留原结果：${reason}`], updatedAt: new Date().toISOString() } }));
       return reason;
     }
-    const failed: ResultRecord = { key: entry.key, path: entry.path, paramsJson: JSON.stringify(frozen), algorithmVersion: currentVersion, width: source?.frame.width, height: source?.frame.height, sourceHash: source?.hash, reviewed: false, manualEdited: false, warnings: [], error: reason, updatedAt: new Date().toISOString() };
+    const failed: ResultRecord = { key: entry.key, path: entry.path, paramsJson: JSON.stringify(frozen), algorithmVersion: currentVersion, width: source?.frame.width, height: source?.frame.height, resolution: source?.resolution, sourceHash: source?.hash, reviewed: false, manualEdited: false, warnings: [], error: reason, updatedAt: new Date().toISOString() };
     setRecords(old => ({ ...old, [entry.key]: failed })); return reason;
   }
   async function openImage(entry: Entry) {
@@ -142,7 +151,7 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
     endEditing(true); setActiveKey(entry.key); setLoaded(null); setError(''); setBusy('正在读取…');
     let source: Loaded | undefined;
     try {
-      source = await readEntry(entry); if (version !== loadVersion.current) return;
+      source = await readEntry(entry, records[entry.key]?.resolution); if (version !== loadVersion.current) return;
       setLoaded(source);
       const existing = records[entry.key];
       if (existing && existing.sourceHash === source.hash && !existing.error && ((existing.paramsJson === paramsJson && existing.algorithmVersion === currentVersion) || existing.manualEdited || existing.reviewed)) {
@@ -159,7 +168,7 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
   }
   async function importFiles(list: FileList | null) {
     if (!list?.length) return;
-    const selected = Array.from(list).filter(file => SUPPORTED.test(file.name) && !(file.webkitRelativePath || '').split('/').some(part => /^(metadata|\.git|node_modules|_audit|pages-dist)$/i.test(part)));
+    const selected = Array.from(list).filter(file => SUPPORTED.test(file.name) && !/^\d{4,}_.+_(overlay|adjusted)\.png$/i.test(file.name) && !(file.webkitRelativePath || '').split('/').some(part => /^(metadata|\.git|node_modules|_audit|pages-dist)$/i.test(part)));
     if (!selected.length) { setError('没有找到支持的图像文件。'); return; }
     const next = selected.map((file, i) => {
       const duplicate = selected.filter(other => other.name === file.name).length > 1;
@@ -167,7 +176,7 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
       return { path, file, key: `${path}\n${file.size}\n${file.lastModified}` };
     });
     const merged = new Map(entries.map(entry => [entry.key, entry])); next.forEach(entry => merged.set(entry.key, entry));
-    setEntries([...merged.values()]); setMessage(`已载入 ${next.length} 张图。`); setDownloadLink(null);
+    setEntries([...merged.values()]); setResolutionConfirmed(false); setReplaceReviewed(false); setMessage(`已载入 ${next.length} 张图。`); setDownloadLink(null);
     await openImage(next[0]);
   }
   async function analyzeCurrent() {
@@ -177,30 +186,42 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
     catch (cause) { setError(fail(active, parameters, cause, loaded)); }
     finally { setBusy(''); }
   }
-  async function analyzeAll() {
-    if (!entries.length || busy) return;
+  async function analyzeAll(unifyResolution = false) {
+    if (!entries.length || busy || (unifyResolution && (mode !== 'scratch' || !resolutionConfirmed))) return;
     const frozen = { ...parameters }, signature = JSON.stringify(frozen), queue = [...entries];
+    const referenceSizes = new Map<string, { width: number; height: number }>();
     const status: Progress = { running: true, done: 0, total: queue.length, failed: 0, skipped: 0, stopped: false, issues: [] };
-    cancel.current = false; endEditing(true); setProgress({ ...status }); setError(''); setMessage('');
+    cancel.current = false; endEditing(true); setProgress({ ...status }); setError(''); setMessage(''); setDownloadLink(null);
     try {
       for (let i = 0; i < queue.length; i++) {
         if (cancel.current) { status.stopped = true; break; }
         const entry = queue[i], previous = records[entry.key];
         setBusy(`正在分析 ${i + 1} / ${queue.length}…`); await tick();
-        if (previous && !previous.error && (previous.manualEdited || previous.reviewed) && (previous.paramsJson !== signature || previous.algorithmVersion !== currentVersion)) {
-          status.skipped++; status.issues.push(`${entry.path}：参数或算法不同，保留人工结果。`);
+        if (previous && !previous.error && (previous.manualEdited || previous.reviewed) && (unifyResolution ? !replaceReviewed : previous.paramsJson !== signature || previous.algorithmVersion !== currentVersion)) {
+          status.skipped++; status.issues.push(`${entry.path}：保留人工结果。${unifyResolution ? '如需统一，请勾选「同时重算已复核/手工修改图」。' : '参数或算法不同。'}`);
         } else {
           let source: Loaded | undefined;
           try {
-            source = entry.key === activeKey && loaded ? loaded : await readEntry(entry);
-            if (!previous || previous.error || previous.sourceHash !== source.hash || previous.paramsJson !== signature || previous.algorithmVersion !== currentVersion) {
+            if (unifyResolution) {
+              const baseline = resolveScratchBaseline(entry.path, queue);
+              let size = referenceSizes.get(baseline.path);
+              if (!size) {
+                const reference = await readEntry(baseline);
+                size = { width: reference.frame.width, height: reference.frame.height };
+                referenceSizes.set(baseline.path, size);
+              }
+              source = await readEntry(entry, { ...size, baselinePath: baseline.path, confirmedSameField: true });
+            } else source = entry.key === activeKey && loaded ? loaded : await readEntry(entry, previous?.resolution);
+            if (unifyResolution || !previous || previous.error || previous.sourceHash !== source.hash || previous.paramsJson !== signature || previous.algorithmVersion !== currentVersion) {
               const result = await processFrame(mode, source.frame, frozen);
               const next = makeRecord(entry, source, frozen, result, mode);
+              if (unifyResolution) next.pairConfirmed = true;
               setRecords(old => ({ ...old, [entry.key]: next }));
+              if (entry.key === activeKey) setLoaded(source);
             } else if (previous.lastRunError) {
               setRecords(old => ({ ...old, [entry.key]: { ...previous, lastRunError: undefined, warnings: previous.warnings.filter(warning => !warning.startsWith('本次处理失败')) } }));
             }
-          } catch (cause) { status.failed++; status.issues.push(`${entry.path}：${fail(entry, frozen, cause, source)}`); }
+          } catch (cause) { status.failed++; status.issues.push(`${entry.path}：${fail(entry, frozen, cause, source, unifyResolution)}`); }
         }
         status.done++; setProgress({ ...status, issues: [...status.issues] });
       }
@@ -328,17 +349,19 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
         const image: { path: string; status: string; [key: string]: unknown } = { path: entry.path, status: 'failed' };
         setBusy(`正在导出${label} ${i + 1} / ${targets.length}…`); await tick();
         try {
-          const input = entry.key === activeKey && loaded ? loaded : await readEntry(entry);
-          image.sourceHash = input.hash; image.width = input.frame.width; image.height = input.frame.height; image.sourceWarnings = input.warnings;
+          const input = entry.key === activeKey && loaded ? loaded : await readEntry(entry, item?.resolution);
+          image.sourceHash = input.hash; image.width = input.frame.width; image.height = input.frame.height; image.sourceWarnings = input.warnings; image.resolution = input.resolution;
           if (!adjustedOnly && input.hash !== item.sourceHash) throw new Error('源文件已改变，请重新分析。');
+          if (!adjustedOnly && (input.frame.width !== item.width || input.frame.height !== item.height)) throw new Error('分析尺寸已改变，请重新分析。');
           const adjusted = normalizeBackground(input.frame, frozen, input.background), metadata = displayMetadata(frozen, adjusted, exportedLineStyle);
+          metadata.analysisUsesRawPixels = !input.resolution;
           image.display = metadata;
           if (frozen.enabled && !adjusted.estimate.valid) throw new Error(adjusted.warnings.join('；') || '无法可靠估计背景。');
           output.width = input.frame.width; output.height = input.frame.height; drawOverlay(context, adjusted.frame, frozenLineStyle, adjustedOnly ? undefined : item);
           const blob = await new Promise<Blob>((resolve, reject) => output.toBlob(value => value ? resolve(value) : reject(new Error('PNG 编码失败')), 'image/png'));
           const stem = `${String(i + 1).padStart(4, '0')}_${safeFilePart(entry.file.name.replace(/\.[^.]+$/, ''))}`;
           const imageFile = `${stem}_${adjustedOnly ? 'adjusted' : 'overlay'}.png`, displayFile = `_metadata/${stem}.display.json`, analysisFile = `_metadata/${stem}.analysis.json`;
-          files.push({ name: imageFile, data: new Uint8Array(await blob.arrayBuffer()) }, { name: displayFile, data: new TextEncoder().encode(JSON.stringify({ path: entry.path, sourceHash: input.hash, width: input.frame.width, height: input.frame.height, ...metadata }, null, 2)) });
+          files.push({ name: imageFile, data: new Uint8Array(await blob.arrayBuffer()) }, { name: displayFile, data: new TextEncoder().encode(JSON.stringify({ path: entry.path, sourceHash: input.hash, width: input.frame.width, height: input.frame.height, resolution: input.resolution, ...metadata }, null, 2)) });
           if (!adjustedOnly) files.push({ name: analysisFile, data: new TextEncoder().encode(JSON.stringify(item, null, 2)) });
           image.status = 'completed'; image.imageFile = imageFile; image.displayFile = displayFile; if (!adjustedOnly) image.analysisFile = analysisFile; completed++;
         } catch (cause) {
@@ -351,7 +374,7 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
       images.push(...targets.slice(status.done).map(entry => ({ path: entry.path, status: 'unprocessed' })));
       if (!completed) throw new Error(`没有成功导出的${label}。${status.issues[0] || (status.stopped ? '已停止。' : '')}`);
       if (!adjustedOnly) files.push({ name: 'results.csv', data: new TextEncoder().encode(makeMigrationCsv(mode, exportRows)) });
-      files.push({ name: 'manifest.json', data: new TextEncoder().encode(JSON.stringify({ mode, kind: adjustedOnly ? 'adjusted-images' : 'analysis-overlays', settings: frozen, ...(exportedLineStyle ? { lineStyle: exportedLineStyle } : {}), displayOnly: true, analysisUsesRawPixels: true, requested: targets.length, completed, failed: status.failed, stopped: status.stopped, unprocessed: targets.length - status.done, images, issues: status.issues, exportedAt: new Date().toISOString() }, null, 2)) });
+      files.push({ name: 'manifest.json', data: new TextEncoder().encode(JSON.stringify({ mode, kind: adjustedOnly ? 'adjusted-images' : 'analysis-overlays', settings: frozen, ...(exportedLineStyle ? { lineStyle: exportedLineStyle } : {}), displayOnly: true, analysisUsesRawPixels: !images.some(image => image.resolution), requested: targets.length, completed, failed: status.failed, stopped: status.stopped, unprocessed: targets.length - status.done, images, issues: status.issues, exportedAt: new Date().toISOString() }, null, 2)) });
       setBusy('正在打包 ZIP…'); await tick();
       const zip = await createStoredZip(files); presentDownload(new Blob([zip], { type: 'application/zip' }), `${mode}_${completed < targets.length ? '部分完成_' : ''}${label}.zip`);
       setMessage(`${label}已导出 ${completed}/${targets.length}${status.failed ? `；失败 ${status.failed} 张` : ''}${status.stopped ? '；已停止' : ''}。`);
@@ -373,18 +396,24 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
   const control = (item: typeof controls[number]) => <label key={item.key}>{item.label}<input type="number" min={item.min} max={item.max} step={item.step ?? 1} value={Number((parameters as unknown as Record<string, unknown>)[item.key])} disabled={!!busy} onChange={event => { endEditing(true); setParameters(old => ({ ...old, [item.key]: +event.target.value })); setDownloadLink(null); }} /></label>;
   return <div className="migration-app">
     <header className="migration-header"><a className="migration-brand" href="../"><span>✳</span> FluoroScope</a><nav><a href="../intensity/">荧光</a><a href="../edu/">EdU</a><a href="../scratch/" aria-current={mode === 'scratch' ? 'page' : undefined}>划痕</a><a href="../transwell/" aria-current={mode === 'transwell' ? 'page' : undefined}>Transwell</a><a href="../cck8/">CCK-8</a><a href="../if-count/">切片计数</a><a href="../colony/">平板克隆</a></nav><small>本地处理</small></header>
-    <main className="migration-main"><div className="migration-heading"><h1>{title}</h1><div><button className="quiet" disabled={!entries.length || !!busy} onClick={() => { ++loadVersion.current; endEditing(true); setEntries([]); setRecords({}); setLoaded(null); setActiveKey(''); setProgress(null); setError(''); setMessage(''); setDownloadLink(null); }}>清空列表</button><button disabled={!!busy} onClick={() => fileInput.current?.click()}>选择图像</button><button className="primary" disabled={!!busy} onClick={() => folderInput.current?.click()}>导入文件夹</button></div></div>
+    <main className="migration-main"><div className="migration-heading"><h1>{title}</h1><div><button className="quiet" disabled={!entries.length || !!busy} onClick={() => { ++loadVersion.current; endEditing(true); setEntries([]); setRecords({}); setResolutionConfirmed(false); setReplaceReviewed(false); setLoaded(null); setActiveKey(''); setProgress(null); setError(''); setMessage(''); setDownloadLink(null); }}>清空列表</button><button disabled={!!busy} onClick={() => fileInput.current?.click()}>选择图像</button><button className="primary" disabled={!!busy} onClick={() => folderInput.current?.click()}>导入文件夹</button></div></div>
       <input hidden ref={fileInput} type="file" multiple accept=".png,.jpg,.jpeg,.tif,.tiff,.bmp,.webp" onChange={event => { void importFiles(event.target.files); event.target.value = ''; }} /><input hidden ref={folderInput} type="file" multiple {...({ webkitdirectory: '' } as Record<string, string>)} onChange={event => { void importFiles(event.target.files); event.target.value = ''; }} />
       {error && <div className="migration-error" role="alert">{error}</div>}{message && <div className="migration-message" role="status">{message}</div>}
       <div className="migration-workspace"><aside className="migration-controls">
         {entries.length > 0 && <><select aria-label="图像列表" disabled={!!busy} value={activeKey} onChange={event => { const entry = entries.find(item => item.key === event.target.value); if (entry) void openImage(entry); }}>{entries.map(entry => <option key={entry.key} value={entry.key}>{records[entry.key]?.error || records[entry.key]?.lastRunError ? '失败 · ' : records[entry.key]?.reviewed ? '✓ ' : records[entry.key] ? '已算 · ' : ''}{entry.path}</option>)}</select><div className="migration-prev-next"><button disabled={!!busy || currentIndex <= 0} onClick={() => void openImage(entries[currentIndex - 1])}>←</button><span>{currentIndex + 1} / {entries.length}</span><button disabled={!!busy || currentIndex === entries.length - 1} onClick={() => void openImage(entries[currentIndex + 1])}>→</button></div></>}
         <div className="migration-basic-controls">{controls.slice(0, 2).map(control)}</div><details><summary>更多参数</summary><div className="migration-parameter-grid">{controls.slice(2).map(control)}</div>{mode === 'transwell' && <label className="check"><input type="checkbox" checked={(parameters as TranswellParameters).excludeEdge} disabled={!!busy} onChange={event => { endEditing(true); setParameters(old => ({ ...old, excludeEdge: event.target.checked })); }} />排除触边对象</label>}</details>
-        <details className="migration-background-settings"><summary>背景设置</summary><label>目标亮度<input type="number" min={160} max={250} defaultValue={backgroundSettings.target} disabled={!!busy} onBlur={event => { const value = Number(event.target.value); const target = event.target.value && Number.isFinite(value) ? Math.max(160, Math.min(250, value)) : backgroundSettings.target; event.target.value = String(target); updateBackground({ target }); }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }} /></label><label className="check"><input type="checkbox" checked={backgroundSettings.matchColor} disabled={!!busy} onChange={event => updateBackground({ matchColor: event.target.checked })} />同时统一色调</label><p>逐张估计背景，共用目标。仅调整显示与导出，分析仍用原图。</p></details>
+        <details className="migration-background-settings"><summary>背景设置</summary><label>目标亮度<input type="number" min={160} max={250} defaultValue={backgroundSettings.target} disabled={!!busy} onBlur={event => { const value = Number(event.target.value); const target = event.target.value && Number.isFinite(value) ? Math.max(160, Math.min(250, value)) : backgroundSettings.target; event.target.value = String(target); updateBackground({ target }); }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }} /></label><label className="check"><input type="checkbox" checked={backgroundSettings.matchColor} disabled={!!busy} onChange={event => updateBackground({ matchColor: event.target.checked })} />同时统一色调</label><p>逐张估计背景，共用目标。仅调整显示与导出，不影响计量。</p></details>
         {mode === 'scratch' && <details><summary>边界设置</summary>
           <label>线条类型<select aria-label="边界线条类型" value={lineStyle.type} disabled={!!busy || editing} onChange={event => updateLineStyle({ type: event.target.value as ScratchLineType })}><option value="contour">贴合细胞</option><option value="straight">直线</option></select></label>
           <p className="migration-line-note">仅调整显示与导出，测量仍用实际边界。</p>
           <label>颜色<span className="migration-line-color"><input type="color" aria-label="边界颜色" value={lineStyle.color} disabled={!!busy} onChange={event => updateLineStyle({ color: event.target.value })} /><input key={lineStyle.color} type="text" aria-label="边界颜色 HEX" defaultValue={lineStyle.color} maxLength={7} spellCheck={false} disabled={!!busy} onBlur={event => { const color = /^#[0-9a-f]{6}$/i.test(event.target.value) ? event.target.value.toLowerCase() : lineStyle.color; event.target.value = color; updateLineStyle({ color }); }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }} /></span></label>
-          <label>粗细（原图 px）<input type="number" min={0.5} max={12} step={0.5} defaultValue={lineStyle.widthPx} disabled={!!busy} onBlur={event => { const value = Number(event.target.value); const widthPx = event.target.value && Number.isFinite(value) ? Math.round(Math.max(0.5, Math.min(12, value)) * 2) / 2 : lineStyle.widthPx; event.target.value = String(widthPx); updateLineStyle({ widthPx }); }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }} /></label>
+          <label>粗细（分析图 px）<input type="number" min={0.5} max={12} step={0.5} defaultValue={lineStyle.widthPx} disabled={!!busy} onBlur={event => { const value = Number(event.target.value); const widthPx = event.target.value && Number.isFinite(value) ? Math.round(Math.max(0.5, Math.min(12, value)) * 2) / 2 : lineStyle.widthPx; event.target.value = String(widthPx); updateLineStyle({ widthPx }); }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }} /></label>
+        </details>}
+        {mode === 'scratch' && <details open={closure?.status === '图像尺寸不一致'}><summary>统一分辨率</summary>
+          <p>按各自同名 0H 的尺寸重算，原文件保留。长宽比不同的图片不拉伸。</p>
+          <label className="check"><input type="checkbox" checked={resolutionConfirmed} disabled={!!busy} onChange={event => setResolutionConfirmed(event.target.checked)} />确认同一倍率、同一视野且未裁剪</label>
+          {Object.values(records).some(item => item.manualEdited || item.reviewed) && <label className="check"><input type="checkbox" checked={replaceReviewed} disabled={!!busy} onChange={event => setReplaceReviewed(event.target.checked)} />同时重算已复核/手工修改图</label>}
+          <button className="wide" disabled={!entries.length || !resolutionConfirmed || !!busy} onClick={() => void analyzeAll(true)}>统一到 0H 并重算全部</button>
         </details>}
         <button className="wide" disabled={!loaded || !!busy} onClick={() => void analyzeCurrent()}>重算此图</button><button className="primary wide" disabled={!entries.length || !!busy} onClick={() => void analyzeAll()}>一键分析全部</button>
         {progress?.running && <div className="migration-progress"><span>{progress.done} / {progress.total}</span><button onClick={() => { cancel.current = true; setMessage('当前图完成后停止。'); }}>停止</button></div>}
@@ -395,7 +424,7 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
           {mode === 'scratch' && editing && <div className="migration-scratch-tools"><div className="migration-edit-modes" aria-label="边界编辑模式">
             <button className={editMode === 'trace' ? 'selected' : ''} aria-pressed={editMode === 'trace'} disabled={!!busy || stale} onClick={() => { cancelScratchStroke(); setEditMode('trace'); }}>沿边描画</button>
             <button className={editMode === 'move' ? 'selected' : ''} aria-pressed={editMode === 'move'} disabled={!!busy || stale} onClick={() => { cancelScratchStroke(); setEditMode('move'); }}>局部拖动</button>
-          </div>{editMode === 'move' && <label>影响范围（原图 px）<input type="number" min={1} max={512} step={1} defaultValue={editRadius} disabled={!!busy || stale} onBlur={event => { cancelScratchStroke(); const value = Number(event.target.value); const radius = event.target.value && Number.isFinite(value) ? Math.max(1, Math.min(512, value)) : editRadius; event.target.value = String(radius); setEditRadius(radius); }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }} /></label>}</div>}
+          </div>{editMode === 'move' && <label>影响范围（分析图 px）<input type="number" min={1} max={512} step={1} defaultValue={editRadius} disabled={!!busy || stale} onBlur={event => { cancelScratchStroke(); const value = Number(event.target.value); const radius = event.target.value && Number.isFinite(value) ? Math.max(1, Math.min(512, value)) : editRadius; event.target.value = String(radius); setEditRadius(radius); }} onKeyDown={event => { if (event.key === 'Enter') event.currentTarget.blur(); }} /></label>}</div>}
           {mode === 'scratch' && <button className="wide" disabled={!!busy || stale || !undoStack.length} onClick={undoScratch}>撤销一步</button>}
           <button className="wide" disabled={!!busy || !record.manualEdited || stale} onClick={resetManual}>恢复自动结果</button>
           <label className="check"><input type="checkbox" checked={record.reviewed} disabled={!!busy || stale || (mode === 'scratch' && !record.scratch?.valid)} onChange={event => updateRecord({ reviewed: event.target.checked })} />已复核</label>
@@ -405,15 +434,15 @@ export default function MigrationAnalyzer({ mode }: { mode: Mode }) {
       </aside><section className="migration-stage-column">
         <div className="migration-stage"><div className="migration-toolbar"><label className="check"><input type="checkbox" checked={overlay} onChange={event => { setOverlay(event.target.checked); if (!event.target.checked) endEditing(); }} />显示标记</label><label className="check"><input type="checkbox" checked={backgroundSettings.enabled} disabled={!!busy} onChange={event => updateBackground({ enabled: event.target.checked })} />统一背景</label>{editing && <span>{mode === 'scratch' ? (editMode === 'trace' ? '从边界旁描画，抬起完成' : '局部拖动，保留凹凸') : '点击添加；点中标记删除'}</span>}<select aria-label="缩放" value={zoom} onChange={event => setZoom(event.target.value)}><option value="fit">适应视野</option><option value="0.5">50%</option><option value="1">100%</option><option value="2">200%</option></select></div>
           <div className={`migration-canvas ${loaded ? '' : 'empty'}`} aria-busy={!!busy}>{loaded ? <canvas ref={canvas} style={zoom === 'fit' ? { width: '100%', height: 'auto' } : { width: loaded.frame.width * +zoom, height: loaded.frame.height * +zoom }} onPointerDown={pointerDown} onPointerMove={pointerMove} onPointerUp={pointerUp} onPointerCancel={event => { if (stroke.current?.pointerId === event.pointerId) cancelScratchStroke(); }} onLostPointerCapture={event => { if (stroke.current?.pointerId === event.pointerId) cancelScratchStroke(); }} aria-label={mode === 'scratch' ? '划痕边界预览，可沿边描画或局部拖动' : '穿膜细胞标记预览，可添加或删除候选点'} /> : <div className="migration-empty"><div>{mode === 'scratch' ? 'Ⅱ' : '⠿'}</div><h2>选择图像开始</h2><p>支持 TIFF · PNG · JPEG</p></div>}{busy && <div className="migration-processing" role="status"><i />{busy}</div>}</div>
-          <div className="migration-meta"><span>{active?.path || '图像保留在本机'}</span><span>{loaded ? `${loaded.frame.width} × ${loaded.frame.height} px` : ''}</span></div></div>
-        {record?.lastRunError && <div className="migration-stale">本次处理失败，当前显示保留的人工结果。</div>}
+          <div className="migration-meta"><span>{active?.path || '图像保留在本机'}</span><span>{loaded ? `${loaded.resolution ? `原始 ${loaded.resolution.originalWidth} × ${loaded.resolution.originalHeight} → 分析 ` : ''}${loaded.frame.width} × ${loaded.frame.height} px` : ''}</span></div></div>
+        {record?.lastRunError && <div className="migration-stale">本次处理失败，当前显示保留的原结果。</div>}
         {stale && <div className="migration-stale">参数或算法已改变，当前保留旧结果。点击「重算此图」更新。</div>}
         {backgroundSettings.enabled && display && !display.estimate.valid && <div className="migration-stale" role="status">背景估计不可靠，当前保留原图。</div>}
         {backgroundSettings.enabled && display && <details className="migration-warning"><summary>背景调整详情{display.warnings.length ? ` (${display.warnings.length})` : ''}</summary><p>估计 RGB：{display.estimate.rgb.join(' / ')} → 目标 {backgroundSettings.target}；增益 {display.gains.map(gain => gain.toFixed(2)).join(' / ')}；截断 {(display.clippedFraction * 100).toFixed(2)}%。</p>{display.warnings.length > 0 && <ul>{display.warnings.map((warning, i) => <li key={i}>{warning}</li>)}</ul>}</details>}
         {record && !record.error && <div className="migration-stats">{mode === 'scratch' ? <><article><span>伤口面积</span><strong>{numberText(record.areaPx)}</strong><small>px²</small></article><article><span>平均宽度</span><strong>{numberText(record.meanWidthPx, 1)}</strong><small>px</small></article><article><span>{record.pairConfirmed ? '闭合率' : '闭合率（待核对）'}</span><strong>{closure?.closurePct == null ? '—' : `${numberText(closure.closurePct, 1)}%`}</strong><small>{closure?.status}</small></article></> : <><article><span>自动估计数</span><strong>{record.autoCount}</strong></article><article><span>修正后计数</span><strong>{record.correctedCount}</strong></article><article><span>染色覆盖率</span><strong>{numberText(record.coveragePct, 1)}%</strong><small>大团块 {record.clusterCount ?? 0}</small></article></>}</div>}
         {record?.warnings.length ? <details className="migration-warning"><summary>质控提示 ({record.warnings.length})</summary><ul>{record.warnings.map((warning, i) => <li key={i}>{warning}</li>)}</ul></details> : null}
         {progress && !progress.running && progress.issues.length > 0 && <details className="migration-warning"><summary>批量处理明细 ({progress.issues.length})</summary><ul>{progress.issues.map((issue, i) => <li key={i}>{issue}</li>)}</ul></details>}
-        <details className="migration-method"><summary>方法与说明</summary>{mode === 'scratch' ? <p>按局部纹理估计纵向划痕左右边界，以边界积分计算面积和平均宽度。可沿边描画或局部拖动修正，保留范围外边界；每笔抬起后更新面积，可撤销。无法识别时不填假零值。闭合率需同一视野 0H、相同尺寸和 ROI；文件名配对仅作提示，必须人工核对。</p> : <p>按染色与亮度筛选区域，再根据空间峰估计穿膜细胞中心；可点击增删标记。重叠细胞、大团块、膜孔和杂质会影响自动计数，请核对；染色面积和覆盖率另行保留。这里只分析图像，不自动划分实验组。</p>}<p>参数变化后旧结果会明确标记。批量会保留参数不同的人工结果；CSV 包含失败、复核、参数和文件来源。关闭页面前请导出。</p></details>
+        <details className="migration-method"><summary>方法与说明</summary>{mode === 'scratch' ? <p>按局部纹理估计纵向划痕左右边界，以边界积分计算面积和平均宽度。可沿边描画或局部拖动修正，保留范围外边界；每笔抬起后更新面积，可撤销。无法识别时不填假零值。闭合率需同一视野 0H、相同分析尺寸和 ROI。仅保存分辨率不同时，可确认同一倍率、同一视野且未裁剪后，统一到同名 0H 尺寸重新分析；长宽比不同不拉伸。CSV 保留原始尺寸和处理记录。文件名配对需人工核对。</p> : <p>按染色与亮度筛选区域，再根据空间峰估计穿膜细胞中心；可点击增删标记。重叠细胞、大团块、膜孔和杂质会影响自动计数，请核对；染色面积和覆盖率另行保留。这里只分析图像，不自动划分实验组。</p>}<p>参数变化后旧结果会明确标记。批量会保留参数不同的人工结果；CSV 包含失败、复核、参数和文件来源。关闭页面前请导出。</p></details>
       </section></div>
     </main>
   </div>;
