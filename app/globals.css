@@ -92,6 +92,12 @@ select,input[type="number"] { min-width:0; height:30px; border:1px solid var(--l
 .display-exclusions button:disabled { opacity:.5; cursor:not-allowed; }
 .display-exclusion-actions { display:flex; flex-wrap:wrap; gap:6px; margin-top:8px; }
 .display-exclusion-actions button { flex:1; border:1px solid var(--line); border-radius:6px; background:#f7faf9; color:#52696a; }
+.mask-tool-switch button[aria-pressed="true"] { border-color:#157c80; background:#157c80; color:white; }
+.display-exclusions .brush-size { display:flex; align-items:center; gap:8px; font-size:14px; }
+.brush-size input { flex:1; min-width:0; accent-color:#157c80; }
+.brush-size output { min-width:4ch; white-space:nowrap; }
+.canvas-stack .brush-draft { cursor:crosshair; opacity:.65; }
+.brush-tip { position:absolute; z-index:1; transform:translate(-50%,-50%); outline:1px solid white; border-radius:50%; box-shadow:0 0 0 2px #333; pointer-events:none; }
 .display-slider-field>input[type="range"] { grid-column:1/-1; width:100%; min-width:0; height:26px; margin:0; accent-color:var(--cyan); cursor:ew-resize; }
 .display-percent { display:flex; align-items:center; gap:4px; }
 .display-percent input[type="number"] { width:62px; font-size:12px; }

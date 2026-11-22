@@ -117,6 +117,71 @@ test('manual masking changes only the selected display channel and not raw pixel
   assert.match(description, /"channelId":"a"/);
 });
 
+test('a brush click is a round dot clipped to image edges', () => {
+  const size = 8;
+  const source = image(size, size, [channel('a', new Array(size * size).fill(200))]);
+  const center = { x: 0.5, y: 0.5 };
+  const rendered = renderRoiPseudocolor({
+    image: source,
+    channels: [{ id: 'a', color: 'blue', displayMin: 0, displayMax: 255 }],
+    displayExclusions: [{ channelId: null, points: [center], diameter: 5 }],
+  });
+  for (let y = 0; y < size; y++) for (let x = 0; x < size; x++) {
+    assert.equal(rendered.rgb[(y * size + x) * 3 + 2], Math.hypot(x, y) <= 2.5 ? 0 : 200);
+  }
+});
+
+test('a hollow brush stroke preserves the nucleus and other channels in a source-coordinate crop', () => {
+  const width = 40, height = 32;
+  const source = image(width, height, [
+    channel('nuclear', new Array(width * height).fill(180)),
+    channel('marker', Array.from({ length: width * height }, (_, i) => 40 + i % 160)),
+  ]);
+  const roi = { x: 10, y: 4, width: 25, height: 25 };
+  const raw = source.channels.map(ch => Array.from(ch.data));
+  const stats = source.channels.map(ch => intensityStats(ch, width, height, roi));
+  const points = [[21, 5], [31, 15], [21, 25], [11, 15], [21, 5]].map(([x, y]) => ({ x: x + 0.5, y: y + 0.5 }));
+  const options = {
+    image: source, roi,
+    channels: [
+      { id: 'nuclear', color: 'blue' as const, displayMin: 0, displayMax: 255 },
+      { id: 'marker', color: 'red' as const, displayMin: 0, displayMax: 255 },
+    ],
+  };
+  const masked = renderRoiPseudocolor({ ...options, displayExclusions: [{ channelId: 'nuclear', points, diameter: 3 }] });
+  const blueAt = (x: number, y: number) => masked.rgb[((y - roi.y) * roi.width + x - roi.x) * 3 + 2];
+  for (const [x, y] of [[21, 5], [26, 10], [26, 20], [16, 20], [16, 10]]) assert.equal(blueAt(x, y), 0);
+  for (const [x, y] of [[21, 15], [23, 16], [12, 6], [32, 26]]) assert.equal(blueAt(x, y), 180);
+  for (let y = 0; y < roi.height; y++) for (let x = 0; x < roi.width; x++) {
+    assert.equal(masked.rgb[(y * roi.width + x) * 3], raw[1][(roi.y + y) * width + roi.x + x]);
+  }
+  assert.deepEqual(source.channels.map(ch => Array.from(ch.data)), raw);
+  assert.deepEqual(source.channels.map(ch => intensityStats(ch, width, height, roi)), stats);
+});
+
+test('a long brush path and the pseudocolor raster survive TIFF round-trip in a small crop', async () => {
+  const size = 256;
+  const points = Array.from({ length: 720 }, (_, i) => {
+    const angle = i * Math.PI / 180;
+    return { x: 128 + 80 * Math.cos(angle), y: 128 + 80 * Math.sin(angle) };
+  });
+  const stroke = { channelId: 'dapi', points, diameter: 5 };
+  const roi = { x: 198, y: 118, width: 20, height: 20 };
+  const rendered = renderRoiPseudocolor({
+    image: image(size, size, [channel('dapi', new Array(size * size).fill(180))]),
+    roi, channels: [{ id: 'dapi', color: 'blue', displayMin: 0, displayMax: 255 }],
+    displayExclusions: [stroke],
+  });
+  const file = await fromArrayBuffer(await encodePseudocolorTiff(rendered));
+  const page = await file.getImage();
+  const description = String(await page.getFileDirectory().loadValue('ImageDescription')).replace(/\0+$/, '');
+  const record = JSON.parse(description.slice(description.indexOf('{')));
+  assert.deepEqual(record.sourceRoi, roi);
+  assert.deepEqual(record.displayExclusions, [stroke]);
+  const pixels = await page.readRasters({ interleave: true });
+  assert.deepEqual(Array.from(pixels), Array.from(rendered.rgb));
+});
+
 test('overlapping all-channel masks hide only their union and leave the scale bar intact', () => {
   const source = image(200, 200, [channel('a', new Array(40000).fill(200))]);
   const region = normalizeDisplayExclusion(200, 200, { x: 0, y: 0, width: 200, height: 200 }, null)!;

@@ -26,13 +26,12 @@ export interface RoiExportMask {
   backgroundB?: number;
 }
 
-export interface DisplayExclusion {
-  /** null hides all channels; otherwise only this channel's display contribution. */
-  channelId: string | null;
-  rect: Rect;
-}
+type BrushPoint = { x: number; y: number };
+type RectangleExclusion = { channelId: string | null; rect: Rect };
+/** Source-image coordinates; a null channel applies to all visible channels. */
+export type DisplayExclusion = RectangleExclusion | { channelId: string | null; points: BrushPoint[]; diameter: number };
 
-export function normalizeDisplayExclusion(width: number, height: number, rect: Rect, channelId: string | null): DisplayExclusion | null {
+export function normalizeDisplayExclusion(width: number, height: number, rect: Rect, channelId: string | null): RectangleExclusion | null {
   if (![width, height, rect.x, rect.y, rect.width, rect.height].every(Number.isFinite) || width <= 0 || height <= 0 || rect.width === 0 || rect.height === 0) return null;
   const bounds = boundsFor(width, height, rect);
   if (!bounds.pixels) return null;
@@ -43,8 +42,65 @@ export function displayExclusionsForChannel(regions: readonly DisplayExclusion[]
   return regions.filter(region => region.channelId === null || region.channelId === channelId);
 }
 
+// Pixels are sampled at their centers. Distance to the finite segment gives round caps and joins.
+function segmentContains(x: number, y: number, start: BrushPoint, dx: number, dy: number, lengthSquared: number, radiusSquared: number) {
+  const t = lengthSquared ? Math.min(1, Math.max(0, ((x - start.x) * dx + (y - start.y) * dy) / lengthSquared)) : 0;
+  const offsetX = x - (start.x + t * dx);
+  const offsetY = y - (start.y + t * dy);
+  return offsetX * offsetX + offsetY * offsetY <= radiusSquared;
+}
+
 export function isDisplayExcluded(regions: readonly DisplayExclusion[], x: number, y: number): boolean {
-  return regions.some(({ rect }) => x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height);
+  return regions.some(region => {
+    if ('rect' in region) {
+      const { rect } = region;
+      return x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height;
+    }
+    if (!Number.isFinite(region.diameter) || region.diameter <= 0) return false;
+    return region.points.some((end, i, points) => {
+      const start = points[Math.max(0, i - 1)];
+      const dx = end.x - start.x, dy = end.y - start.y;
+      return segmentContains(x + 0.5, y + 0.5, start, dx, dy, dx * dx + dy * dy, (region.diameter / 2) ** 2);
+    });
+  });
+}
+
+/** Rasterize once per visible channel, in the same source grid used by both preview and export. */
+export function buildDisplayExclusionMask(width: number, height: number, regions: readonly DisplayExclusion[]): Uint8Array | null {
+  if (!regions.length) return null;
+  const mask = new Uint8Array(width * height);
+  for (const region of regions) {
+    if ('rect' in region) {
+      const bounds = boundsFor(width, height, region.rect);
+      for (let y = bounds.y0; y < bounds.y1; y++) mask.fill(1, y * width + bounds.x0, y * width + bounds.x1);
+      continue;
+    }
+    const radius = region.diameter / 2;
+    if (!Number.isFinite(radius) || radius <= 0) continue;
+    const radiusSquared = radius * radius;
+    for (let i = 0; i < region.points.length; i++) {
+      const start = region.points[Math.max(0, i - 1)], end = region.points[i];
+      if (![start.x, start.y, end.x, end.y].every(Number.isFinite)) continue;
+      const dx = end.x - start.x, dy = end.y - start.y;
+      const lengthSquared = dx * dx + dy * dy;
+      const y0 = Math.max(0, Math.ceil(Math.min(start.y, end.y) - radius - 0.5));
+      const y1 = Math.min(height - 1, Math.floor(Math.max(start.y, end.y) + radius - 0.5));
+      for (let y = y0; y <= y1; y++) {
+        // Restrict long diagonal segments to the span touching this scanline.
+        const centerY = y + 0.5;
+        const t0 = dy ? clamp((centerY - radius - start.y) / dy, 0, 1) : 0;
+        const t1 = dy ? clamp((centerY + radius - start.y) / dy, 0, 1) : 1;
+        const left = start.x + Math.min(t0 * dx, t1 * dx) - radius;
+        const right = start.x + Math.max(t0 * dx, t1 * dx) + radius;
+        const x0 = Math.max(0, Math.ceil(left - 0.5));
+        const x1 = Math.min(width - 1, Math.floor(right - 0.5));
+        for (let x = x0; x <= x1; x++) {
+          if (segmentContains(x + 0.5, centerY, start, dx, dy, lengthSquared, radiusSquared)) mask[y * width + x] = 1;
+        }
+      }
+    }
+  }
+  return mask;
 }
 
 export interface RenderRoiOptions {
@@ -257,7 +313,8 @@ export function renderRoiPseudocolor(options: RenderRoiOptions): RenderedRoi {
     if (!channel) throw new Error(`找不到要导出的通道：${setting.id}`);
     if (channel.data.length < image.width * image.height) throw new Error(`通道 ${channel.label} 的像素数量不足。`);
     const range = resolveDisplayRange(channel, image.width, image.height, { ...setting, blackPointPercent });
-    return { channel, rgb: colorRgb(setting.color), ...range, exclusions: displayExclusionsForChannel(displayExclusions, channel.id) };
+    const exclusionMask = buildDisplayExclusionMask(image.width, image.height, displayExclusionsForChannel(displayExclusions, channel.id));
+    return { channel, rgb: colorRgb(setting.color), ...range, exclusionMask };
   });
   if (!selected.length) throw new Error('当前视图对应的通道未被选择，无法导出。');
 
@@ -279,7 +336,7 @@ export function renderRoiPseudocolor(options: RenderRoiOptions): RenderedRoi {
       const target = (targetY * width + targetX) * 3;
       let red = 0, green = 0, blue = 0;
       for (const item of selected) {
-        if (isDisplayExcluded(item.exclusions, sourceX, sourceY)) continue;
+        if (item.exclusionMask?.[source]) continue;
         const value = clamp((Number(item.channel.data[source]) - item.low) / item.range, 0, 1);
         red = Math.min(1, red + value * item.rgb[0]);
         green = Math.min(1, green + value * item.rgb[1]);
@@ -323,10 +380,32 @@ export async function encodePseudocolorTiff(rendered: RenderedRoi): Promise<Arra
     PhotometricInterpretation: 2,
     SamplesPerPixel: 3,
     RowsPerStrip: rendered.height,
-    ImageDescription: ROI_TIFF_DESCRIPTION + (rendered.displayExclusions?.length
-      ? ` Manual display exclusions applied; not evidence of contamination removal. ${JSON.stringify({ sourceRoi: rendered.sourceRoi, displayExclusions: rendered.displayExclusions })}` : ''),
+    ImageDescription: ROI_TIFF_DESCRIPTION,
   };
-  return writeArrayBuffer(rendered.rgb, metadata);
+  const encoded = writeArrayBuffer(rendered.rgb, metadata);
+  if (!rendered.displayExclusions?.length) return encoded;
+
+  // geotiff.js reserves just 1000 bytes before its first strip. Store variable-length
+  // provenance after the strip and point the existing ASCII ImageDescription tag at it.
+  const audit = JSON.stringify({ sourceRoi: rendered.sourceRoi, displayExclusions: rendered.displayExclusions })
+    .replace(/[^\x20-\x7e]/g, char => '\\u' + char.charCodeAt(0).toString(16).padStart(4, '0'));
+  const description = new TextEncoder().encode(`${ROI_TIFF_DESCRIPTION} Manual display exclusions applied; not evidence of contamination removal. ${audit}\0`);
+  const descriptionOffset = encoded.byteLength + (encoded.byteLength % 2);
+  const output = new Uint8Array(descriptionOffset + description.length);
+  output.set(new Uint8Array(encoded));
+  output.set(description, descriptionOffset);
+  const ifd = new DataView(output.buffer);
+  const littleEndian = ifd.getUint16(0) === 0x4949;
+  const directory = ifd.getUint32(4, littleEndian);
+  const entries = ifd.getUint16(directory, littleEndian);
+  for (let i = 0; i < entries; i++) {
+    const entry = directory + 2 + 12 * i;
+    if (ifd.getUint16(entry, littleEndian) !== 270) continue;
+    ifd.setUint32(entry + 4, description.length, littleEndian);
+    ifd.setUint32(entry + 8, descriptionOffset, littleEndian);
+    return output.buffer;
+  }
+  throw new Error('无法将展示遮罩记录写入 TIFF。');
 }
 
 export async function renderedRoiToBlob(rendered: RenderedRoi, format: 'png' | 'jpg' | 'jpeg', jpegQuality = 0.92): Promise<Blob> {
