@@ -26,9 +26,9 @@ import { saveFile, type PreparedDownload } from '../lib/save-file';
 import { nextEnabledChannel } from '../lib/channel-navigation';
 import ExportLocation from './export-location';
 import CicPairPanel from './cic-pair-panel';
-import { encodePseudocolorTiff, renderRoiPseudocolor, renderedRoiToBlob, resolveDisplayRange, resolveRulerPixelSize } from '../lib/roi-export';
+import { displayExclusionsForChannel, encodePseudocolorTiff, isDisplayExcluded, normalizeDisplayExclusion, renderRoiPseudocolor, renderedRoiToBlob, resolveDisplayRange, resolveRulerPixelSize, type DisplayExclusion } from '../lib/roi-export';
 
-type Tool = 'roi' | 'background' | 'line';
+type Tool = 'roi' | 'background' | 'line' | 'exclude';
 type View = 'overlay' | 'a' | 'b' | 'mask' | `channel:${string}`;
 type ThresholdMethod = 'costes' | 'otsu' | 'manual' | 'none';
 type BackgroundMethod = 'none' | 'roi' | 'percentile';
@@ -195,6 +195,10 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   const [displayChannelId, setDisplayChannelId] = useState('');
   const [displayBlackPoint, setDisplayBlackPoint] = useState(0);
   const [suppressDisplayBackground, setSuppressDisplayBackground] = useState(false);
+  const [displayExclusions, setDisplayExclusions] = useState<DisplayExclusion[]>([]);
+  const [exclusionsEnabled, setExclusionsEnabled] = useState(true);
+  const [exclusionChannelId, setExclusionChannelId] = useState<string | null>(null);
+  const activeExclusions = useMemo(() => !isColoc && !cicMode && exclusionsEnabled ? displayExclusions : [], [isColoc, cicMode, exclusionsEnabled, displayExclusions]);
   const [showScaleBar, setShowScaleBar] = useState(true);
   const [referencePixelSize, setReferencePixelSize] = useState(0.2);
   const rulerPixelSize = resolveRulerPixelSize(pixelSize, referencePixelSize);
@@ -215,6 +219,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   const profileCanvas = useRef<HTMLCanvasElement>(null);
 
   const enabledIntensityIds = useMemo(() => channelSettings.filter(setting => setting.enabled).map(setting => setting.id), [channelSettings]);
+  const exclusionChannelUnavailable = exclusionChannelId !== null && !enabledIntensityIds.includes(exclusionChannelId);
   const analysisSignature = useMemo(() => JSON.stringify({ mode, channelAId, channelBId, intensityChannels: enabledIntensityIds, roi, backgroundRoi: backgroundMethod === 'roi' ? backgroundRoi : null, scanLine, thresholdMethod, manualA, manualB, backgroundMethod, lineWidth, sigma, pixelSize, allowDisplayOnly }), [mode, channelAId, channelBId, enabledIntensityIds, roi, backgroundRoi, scanLine, thresholdMethod, manualA, manualB, backgroundMethod, lineWidth, sigma, pixelSize, allowDisplayOnly]);
   const analysis = analysisState?.signature === analysisSignature ? analysisState : null;
 
@@ -309,6 +314,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       }
       setImage(loaded);
       const settings = initialChannelSettings(loaded);
+      setDisplayExclusions([]); setExclusionsEnabled(true); setExclusionChannelId(null);
       setChannelSettings(settings); setChannelConfirmed(false); setDisplayChannelId(settings[0]?.id ?? '');
       const fluorescence = settings.filter(setting => setting.enabled);
       const green = loaded.channels.find(channel => channel.id === 'green') ?? loaded.channels.find(channel => channel.id === fluorescence[0]?.id) ?? loaded.channels[0];
@@ -342,7 +348,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     const stretches = displayChannels.map(item => {
       const backgroundFloor = suppressDisplayBackground ? displayBackgroundByChannel.get(item.channel.id)?.floor : undefined;
       const range = resolveDisplayRange(item.channel, image.width, image.height, { displayMin: item.setting?.displayMin, displayMax: item.setting?.displayMax, displayFloor: backgroundFloor, blackPointPercent: displayBlackPoint });
-      return { ...item, ...range, rgb: PSEUDOCOLORS[item.color].rgb };
+      return { ...item, ...range, rgb: PSEUDOCOLORS[item.color].rgb, exclusions: displayExclusionsForChannel(activeExclusions, item.channel.id) };
     });
     for (let y = 0; y < canvas.height; y++) {
       const sourceY = Math.min(image.height - 1, Math.floor(y / canvas.height * image.height));
@@ -353,6 +359,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
         let red = 0, green = 0, blue = 0;
         stretches.forEach(item => {
           if (view !== 'overlay' && view !== 'mask' && view !== item.key) return;
+          if (isDisplayExcluded(item.exclusions, sourceX, sourceY)) return;
           const value = Math.min(1, Math.max(0, (Number(item.channel.data[source]) - item.low) / item.range));
           red = Math.min(1, red + value * item.rgb[0]);
           green = Math.min(1, green + value * item.rgb[1]);
@@ -366,7 +373,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       }
     }
     context.putImageData(pixels, 0, 0);
-  }, [cicMode, image, channelA, channelB, channelASetting, channelBSetting, previewSize, view, analysis, background.a, background.b, displayColorA, displayColorB, isColoc, intensityChannels, displayBlackPoint, suppressDisplayBackground, displayBackgroundByChannel]);
+  }, [cicMode, image, channelA, channelB, channelASetting, channelBSetting, previewSize, view, analysis, background.a, background.b, displayColorA, displayColorB, isColoc, intensityChannels, displayBlackPoint, suppressDisplayBackground, displayBackgroundByChannel, activeExclusions]);
 
   useEffect(() => {
     const canvas = overlayCanvas.current;
@@ -399,6 +406,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     };
     const roiLabel = !isColoc && roi ? `边长 ${roiSideLabel(roi.width, pixelSize, roiSizeUnit)}` : 'ROI';
     drawRect(roi, COLORS.cyan, roiLabel); drawRect(backgroundRoi, COLORS.magenta, 'BG'); drawLine(scanLine);
+    if (tool === 'exclude') displayExclusions.forEach((region, index) => drawRect(region.rect, '#ffad55', `遮罩 ${index + 1}`));
     if (!isColoc && tool === 'roi' && roi && !squareSizeLocked) drawRoiHandles(roi);
     if (showScaleBar && rulerPixelSize > 0) {
       const barPixels = scaleBarUm / rulerPixelSize * sx;
@@ -410,10 +418,10 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       }
     }
     if (draft) {
-      if ('width' in draft) drawRect(draft, tool === 'background' ? COLORS.magenta : '#ffffff', tool === 'background' ? 'BG' : 'ROI');
+      if ('width' in draft) drawRect(draft, tool === 'exclude' ? '#ffad55' : tool === 'background' ? COLORS.magenta : '#ffffff', tool === 'exclude' ? '展示遮罩' : tool === 'background' ? 'BG' : 'ROI');
       else drawLine(draft);
     }
-  }, [image, previewSize, roi, backgroundRoi, scanLine, draft, tool, lineWidth, showScaleBar, pixelSize, scaleBarUm, rulerPixelSize, isColoc, squareSizeLocked, roiSizeUnit]);
+  }, [image, previewSize, roi, backgroundRoi, scanLine, draft, tool, lineWidth, showScaleBar, pixelSize, scaleBarUm, rulerPixelSize, isColoc, squareSizeLocked, roiSizeUnit, displayExclusions]);
 
   useEffect(() => {
     const canvas = scatterCanvas.current;
@@ -517,7 +525,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
   };
 
   const handlePointerDown = (event: React.PointerEvent<HTMLCanvasElement>) => {
-    if (!image || !event.isPrimary || (event.pointerType === 'mouse' && event.button !== 0)) return;
+    if (!image || loading || exportingRoi || !event.isPrimary || (event.pointerType === 'mouse' && event.button !== 0)) return;
     event.currentTarget.setPointerCapture(event.pointerId);
     const point = pointFromEvent(event);
     const selected = normalizedRect(roi);
@@ -564,6 +572,13 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     if (roiMoveOffset) { setRoiMoveOffset(null); event.currentTarget.style.cursor = ''; return; }
     if (!dragStart) return;
     const final = makeDraft(dragStart, pointFromEvent(event));
+    if (tool === 'exclude' && image && 'width' in final) {
+      if (!exclusionChannelUnavailable && Math.abs(final.width) >= 1 && Math.abs(final.height) >= 1) {
+        const region = normalizeDisplayExclusion(image.width, image.height, final, exclusionChannelId);
+        if (region) { setDisplayExclusions(current => [...current, region]); setExclusionsEnabled(true); }
+      }
+      setDragStart(null); setDraft(null); return;
+    }
     if ('width' in final && Math.abs(final.width) > 2 && Math.abs(final.height) > 2) {
       if (tool === 'background') setBackgroundRoi(normalizedRect(final));
       else {
@@ -671,6 +686,17 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       .catch(problem => setError(problem instanceof Error ? problem.message : '文件保存失败，请重试。'));
   };
 
+  const displayExclusionRecord = () => ({
+    schema: 'FluoroScope display exclusions 1.0', createdAt: new Date().toISOString(),
+    note: 'Manual display-only masking, not mycoplasma detection or evidence of contamination removal. Raw pixels and quantitative results are unchanged.',
+    source: image ? { fileName: image.fileName, sourceFiles: image.sourceFiles, sha256: image.hash, width: image.width, height: image.height } : null,
+    coordinates: 'Original image pixels; origin top-left; x right, y down; right/bottom edges exclusive; null channelId means all channels.',
+    enabled: exclusionsEnabled, regions: displayExclusions, crop: roi,
+    channels: channelSettings, blackPointPercent: displayBlackPoint,
+    backgroundSuppression: suppressDisplayBackground ? Object.fromEntries(displayBackgroundByChannel) : null,
+    scaleBar: { shown: showScaleBar, lengthUm: scaleBarUm, displayPixelSizeUm: rulerPixelSize, calibrated: Number.isFinite(pixelSize) && pixelSize > 0 },
+  });
+
   const exportRows = () => {
     if (!channelConfirmed) { setError('请先确认通道名称和伪彩。'); return; }
     if (!analysis || !image || !channelA || !channelB) return;
@@ -736,6 +762,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
     if (!analysis || !image || !channelA || !channelB) return;
     const payload = {
       schema: 'FluoroScope analysis 1.3', mode, createdAt: analysis.createdAt,
+      displayExclusions: displayExclusions.length ? displayExclusionRecord() : undefined,
       source: { fileName: image.fileName, sourceFiles: image.sourceFiles, sha256: image.hash, format: image.format, width: image.width, height: image.height, pageCount: image.pageCount, displayOnly: image.displayOnly },
       channels: mode === 'colocalization'
         ? { a: { id: channelA.id, sourceLabel: channelA.label, label: channelALabel, sourceColor: channelA.sourceColor, bitDepth: channelA.bitDepth }, b: { id: channelB.id, sourceLabel: channelB.label, label: channelBLabel, sourceColor: channelB.sourceColor, bitDepth: channelB.bitDepth } }
@@ -774,7 +801,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
       const extension = format === 'tiff' ? 'tif' : format;
       const mime = format === 'tiff' ? 'image/tiff' : format === 'jpg' ? 'image/jpeg' : 'image/png';
       const blankViews: string[] = [];
-      const baseName = `${safeFilePart(image.fileName.replace(/\.[^.]+$/, ''), 'image')}_${roi ? `ROI-x${exportBounds.x0}-y${exportBounds.y0}` : 'Full'}-${exportBounds.x1 - exportBounds.x0}x${exportBounds.y1 - exportBounds.y0}px`;
+      const baseName = `${safeFilePart(image.fileName.replace(/\.[^.]+$/, ''), 'image')}_${roi ? `ROI-x${exportBounds.x0}-y${exportBounds.y0}` : 'Full'}-${exportBounds.x1 - exportBounds.x0}x${exportBounds.y1 - exportBounds.y0}px${activeExclusions.length ? '_展示遮罩' : ''}`;
       const batch = !isColoc && intensityExportTarget === 'all';
       const fileName = batch ? `${baseName}_Merge+Channels_${format.toUpperCase()}.zip` : `${baseName}_${jobs[0].suffix}.${extension}`;
       const saved = await saveFile(fileName, batch ? 'application/zip' : mime, async () => {
@@ -786,6 +813,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
             roi,
             view: job.view,
             blackPointPercent: displayBlackPoint,
+            displayExclusions: activeExclusions,
             pixelSizeUm: showScaleBar ? rulerPixelSize : null,
             scaleBarUm: showScaleBar ? scaleBarUm : null,
             mask: job.view === 'mask' && analysis?.coloc ? { channelAId: channelA.id, channelBId: channelB.id, thresholdA: analysis.coloc.thresholdA, thresholdB: analysis.coloc.thresholdB, backgroundA: background.a, backgroundB: background.b } : null,
@@ -797,6 +825,7 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
             : await (await renderedRoiToBlob(rendered, format)).arrayBuffer();
           archiveEntries.push({ name: `${baseName}_${job.suffix}.${extension}`, data });
         }
+        if (batch && activeExclusions.length) archiveEntries.push({ name: 'display-exclusions.json', data: new TextEncoder().encode(JSON.stringify(displayExclusionRecord(), null, 2)).buffer as ArrayBuffer });
         return batch
           ? new Blob([await createStoredZip(archiveEntries)], { type: 'application/zip' })
           : new Blob([archiveEntries[0].data], { type: mime });
@@ -946,6 +975,20 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
 
           {!cicMode && <div className="field-group"><p>显示去杂色</p><label className="scale-toggle"><input type="checkbox" checked={suppressDisplayBackground} disabled={!image || !backgroundRoi} onChange={event => setSuppressDisplayBackground(event.target.checked)} /><span>背景 ROI 均值 + {DISPLAY_BACKGROUND_SD_MULTIPLIER} SD</span></label><small className="field-help">{backgroundRoi ? '仅改变显示和图片导出。' : '先在图中框选背景 ROI。'}</small></div>}
 
+          {!isColoc && !cicMode && <div className="field-group display-exclusions">
+            <p>手动遮罩 · 仅展示</p>
+            <label className="wide-field">作用通道<select aria-label="新遮罩的作用通道" value={exclusionChannelId === null ? 'all' : `channel:${exclusionChannelId}`} disabled={loading || Boolean(exportingRoi)} onChange={event => {
+              const id = event.target.value === 'all' ? null : event.target.value.slice('channel:'.length);
+              setExclusionChannelId(id); selectIntensityView(id === null ? 'merge' : `channel:${id}`);
+            }}><option value="all">全部显示通道</option>{exclusionChannelUnavailable && <option value={`channel:${exclusionChannelId}`} disabled>该通道未勾选，请重新选择</option>}{intensityChannels.map(({ channel, setting }) => <option key={channel.id} value={`channel:${channel.id}`}>{setting.label || channel.label}</option>)}</select></label>
+            <button className="channel-confirm" disabled={loading || Boolean(exportingRoi) || !intensityChannels.length || exclusionChannelUnavailable} onClick={() => { setTool(tool === 'exclude' ? 'roi' : 'exclude'); setDragStart(null); setDraft(null); setRoiMoveOffset(null); setRoiResize(null); }}>{tool === 'exclude' ? '完成框选' : '框选要隐藏的区域'}</button>
+            <small className="field-help">拖出矩形，可连续圈选多处；选中通道的框内信号置黑，不补画。</small>
+            <label className="scale-toggle"><input type="checkbox" checked={exclusionsEnabled} disabled={!displayExclusions.length || Boolean(exportingRoi)} onChange={event => setExclusionsEnabled(event.target.checked)} /><span>应用遮罩（{displayExclusions.length} 处）</span></label>
+            <div className="display-exclusion-actions"><button disabled={!displayExclusions.length || Boolean(exportingRoi)} onClick={() => setDisplayExclusions(current => current.slice(0, -1))}>撤销上一处</button><button disabled={!displayExclusions.length || Boolean(exportingRoi)} onClick={() => setDisplayExclusions([])}>清空遮罩</button></div>
+            {image && displayExclusions.length > 0 && <button className="channel-confirm" disabled={Boolean(exportingRoi)} onClick={() => saveText(`${safeFilePart(image.fileName.replace(/\.[^.]+$/, ''))}_展示遮罩记录.json`, JSON.stringify(displayExclusionRecord(), null, 2), 'application/json')}>导出遮罩记录</button>}
+            <small className="field-help">原图与定量不变；不代表去除支原体。换图清空遮罩，导出另加“展示遮罩”后缀。</small>
+          </div>}
+
           {!isColoc && !cicMode && <>
             <div className="field-group"><p>正方形裁剪与标尺</p>{image && <div className="crop-size-field"><span>实际边长</span>{roiSideInput('裁剪边长')}<select aria-label="裁剪边长单位" value={roiSizeUnit} onChange={event => setRoiSizeUnit(event.target.value as RoiSizeUnit)}><option value="px">px</option><option value="um" disabled={!pixelSize}>µm</option><option value="mm" disabled={!pixelSize}>mm</option><option value="cm" disabled={!pixelSize}>cm</option></select></div>}<label className="scale-toggle"><input type="checkbox" checked={squareSizeLocked} onChange={event => { setSquareSizeLocked(event.target.checked); setRoiResize(null); }} /><span>固定边长（仅移动）</span></label><small className="field-help">{squareSizeLocked ? '已固定；框内拖动可移动位置。' : '拖四角缩放，框内拖动移动；输入实际边长可精确设置。'}</small><label className="number-field"><span>排版比例</span><input aria-label="排版比例分母" type="number" min="1" max="100000" step="100" value={layoutSizeRatio} onChange={event => setLayoutSizeRatio(Math.min(100000, Math.max(1, Math.round(Number(event.target.value) || 1))))} /><span>倍</span></label><small className="field-help">实际 : 排版 = 1 : {layoutSizeRatio}{layoutReferenceCm !== null ? ` → ${format(layoutReferenceCm, 4)} cm` : ''}；仅换算，不改变 ROI、定量或导出像素。</small><label className="number-field"><span>像素尺寸</span><input type="number" min="0" step="0.001" value={pixelSize} onChange={event => { const value = Math.max(0, Number(event.target.value) || 0); setPixelSize(value); if (!value) setRoiSizeUnit('px'); }} /><span>µm/px</span></label>{referenceScaleControls}<label className="scale-toggle"><input type="checkbox" checked={showScaleBar} onChange={event => setShowScaleBar(event.target.checked)} /><span>导出显示比例尺</span></label>{showScaleBar && <label className="number-field"><span>比例尺</span><input type="number" min="0.1" step="0.1" value={scaleBarUm} onChange={event => setScaleBarUm(Math.max(.1, Number(event.target.value) || .1))} /><span>µm</span></label>}</div>
             <div className="field-group"><p>线扫描通道（可选）</p><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorA].css }} />通道 A<select value={channelAId} onChange={event => setChannelAId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{channelSettings.find(setting => setting.id === channel.id)?.label || channel.label}</option>)}</select></label><label><span className="dot" style={{ backgroundColor: PSEUDOCOLORS[displayColorB].css }} />通道 B<select value={channelBId} onChange={event => setChannelBId(event.target.value)} disabled={!image}>{image?.channels.map(channel => <option key={channel.id} value={channel.id}>{channelSettings.find(setting => setting.id === channel.id)?.label || channel.label}</option>)}</select></label></div>
@@ -959,12 +1002,12 @@ export default function Analyzer({ mode }: { mode: AnalysisMode }) {
         </aside>
 
         <div className="image-stage" style={cicMode ? { display: 'none' } : undefined}>
-          <div className="stage-toolbar"><div className="view-switch"><button className={view === 'overlay' ? 'selected' : ''} onClick={() => { if (isColoc) setView('overlay'); else selectIntensityView('merge'); }}>Merge</button>{isColoc ? <><button className={view === 'a' ? 'selected' : ''} onClick={() => setView('a')}>通道 A</button><button className={view === 'b' ? 'selected' : ''} onClick={() => setView('b')}>通道 B</button><button className={view === 'mask' ? 'selected' : ''} onClick={() => setView('mask')} disabled={!analysis?.coloc}>Mask</button></> : intensityChannels.map(({ channel, setting }) => <button key={channel.id} className={view === `channel:${channel.id}` ? 'selected' : ''} onClick={() => selectIntensityView(`channel:${channel.id}`)}><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[setting.color].css }} />{setting.label || channel.label}</button>)}</div><span>显示设置不影响定量</span></div>
+          <div className="stage-toolbar"><div className="view-switch"><button className={view === 'overlay' ? 'selected' : ''} onClick={() => { if (isColoc) setView('overlay'); else selectIntensityView('merge'); }}>Merge</button>{isColoc ? <><button className={view === 'a' ? 'selected' : ''} onClick={() => setView('a')}>通道 A</button><button className={view === 'b' ? 'selected' : ''} onClick={() => setView('b')}>通道 B</button><button className={view === 'mask' ? 'selected' : ''} onClick={() => setView('mask')} disabled={!analysis?.coloc}>Mask</button></> : intensityChannels.map(({ channel, setting }) => <button key={channel.id} className={view === `channel:${channel.id}` ? 'selected' : ''} onClick={() => selectIntensityView(`channel:${channel.id}`)}><i className="dot" style={{ backgroundColor: PSEUDOCOLORS[setting.color].css }} />{setting.label || channel.label}</button>)}</div><span>{activeExclusions.length ? '已应用展示遮罩 · 定量仍用原图' : '显示设置不影响定量'}</span></div>
           <div className={`canvas-area tool-${tool}`}>
             {!image && <div className="empty-canvas"><div className="scan-grid" /><span className="crosshair" aria-hidden="true" /><p>等待图像</p><small>可直接选择 FV3000 .oir 原始文件</small></div>}
-            {image && <div className="canvas-stack" style={{ aspectRatio: `${image.width}/${image.height}`, maxWidth: `${Math.min(previewSize.width, MAX_PREVIEW_HEIGHT * image.width / image.height)}px` }}><canvas ref={imageCanvas} /><canvas ref={overlayCanvas} aria-label={`在图像上绘制${tool === 'roi' ? '分析 ROI' : tool === 'background' ? '背景 ROI' : '线扫描'}`} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={event => { setDragStart(null); setDraft(null); setRoiMoveOffset(null); setRoiResize(null); event.currentTarget.style.cursor = ''; }} /></div>}
+            {image && <div className="canvas-stack" style={{ aspectRatio: `${image.width}/${image.height}`, maxWidth: `${Math.min(previewSize.width, MAX_PREVIEW_HEIGHT * image.width / image.height)}px` }}><canvas ref={imageCanvas} /><canvas ref={overlayCanvas} aria-label={`在图像上绘制${tool === 'roi' ? '分析 ROI' : tool === 'background' ? '背景 ROI' : tool === 'exclude' ? '展示遮罩' : '线扫描'}`} onPointerDown={handlePointerDown} onPointerMove={handlePointerMove} onPointerUp={handlePointerUp} onPointerCancel={event => { setDragStart(null); setDraft(null); setRoiMoveOffset(null); setRoiResize(null); event.currentTarget.style.cursor = ''; }} /></div>}
           </div>
-          <div className="stage-tools" aria-label="绘图工具"><button className={tool === 'roi' ? 'selected' : ''} onClick={() => setTool('roi')}><b>□</b>{isColoc ? '分析 ROI' : '正方形裁剪'}</button><button className={tool === 'background' ? 'selected' : ''} onClick={() => setTool('background')}><b>▧</b>背景 ROI</button>{!isColoc && <button className={tool === 'line' ? 'selected' : ''} onClick={() => setTool('line')}><b>╱</b>线扫描</button>}<span className="tool-spacer" /><button onClick={() => setRoi(null)}>使用全图</button><button onClick={() => { setRoi(null); setBackgroundRoi(null); setScanLine(null); setSuppressDisplayBackground(false); }}>清除标注</button></div>
+          <div className="stage-tools" aria-label="绘图工具"><button className={tool === 'roi' ? 'selected' : ''} onClick={() => setTool('roi')}><b>□</b>{isColoc ? '分析 ROI' : '正方形裁剪'}</button><button className={tool === 'background' ? 'selected' : ''} onClick={() => setTool('background')}><b>▧</b>背景 ROI</button>{!isColoc && <button className={tool === 'line' ? 'selected' : ''} onClick={() => setTool('line')}><b>╱</b>线扫描</button>}<span className="tool-spacer" /><button onClick={() => setRoi(null)}>使用全图</button><button onClick={() => { setRoi(null); setBackgroundRoi(null); setScanLine(null); setSuppressDisplayBackground(false); setDisplayExclusions([]); }}>清除标注</button></div>
           <div className="stage-foot"><span>{isColoc ? 'ROI' : '正方形裁剪区'}：{roiText}{!isColoc && layoutReferenceCm !== null ? ` ｜ 排版 1:${layoutSizeRatio} → ${format(layoutReferenceCm, 4)} cm` : ''}</span>{!isColoc && <span>线长：{scanLine ? `${format(lineLength, 1)} px${pixelSize ? ` / ${format(lineLength * pixelSize, 2)} µm` : ''}` : '—'}</span>}<span>{isColoc ? `BG A/B：${format(background.a, 2)} / ${format(background.b, 2)}` : `定量背景：${backgroundLabels[backgroundMethod]}`}</span></div>
           <div className="roi-export-panel"><div><strong>{roi ? isColoc ? `ROI ${Math.round(roi.width)} × ${Math.round(roi.height)} px` : `裁剪边长 ${roiSideLabel(roi.width, pixelSize, roiSizeUnit)}` : image ? `全图 ${image.width} × ${image.height} px` : '请先导入图片'}</strong><small>{!isColoc && intensityExportTarget === 'all' ? `批量：Merge + ${intensityChannels.length} 个已勾选单通道，装入一个 ZIP。` : '图片为伪彩；定量用 CSV / JSON。'}{showScaleBar ? ' 比例尺会写入图片。' : ''}</small></div><div className="roi-export-controls">{!isColoc && <select aria-label="导出内容" value={intensityExportTarget} disabled={!image || Boolean(exportingRoi)} onChange={event => selectIntensityView(event.target.value as IntensityExportTarget)}><option value="merge">Merge（已勾选通道）</option>{intensityChannels.map(({ channel, setting }) => <option key={channel.id} value={`channel:${channel.id}`}>{setting.label || channel.label}</option>)}<option value="all">全部：Merge + 单通道（ZIP）</option></select>}<div className="export-actions"><button disabled={!image || !channelConfirmed || Boolean(exportingRoi)} onClick={() => { void exportRoiImage('png'); }}>{exportingRoi === 'png' ? '处理中…' : '导出 PNG'}</button><button disabled={!image || !channelConfirmed || Boolean(exportingRoi)} onClick={() => { void exportRoiImage('jpg'); }}>{exportingRoi === 'jpg' ? '处理中…' : '导出 JPG'}</button><button disabled={!image || !channelConfirmed || Boolean(exportingRoi)} onClick={() => { void exportRoiImage('tiff'); }}>{exportingRoi === 'tiff' ? '处理中…' : '导出 TIFF'}</button></div></div></div>
           <ExportLocation />

@@ -5,7 +5,7 @@ import { fromArrayBuffer } from 'geotiff';
 
 import { intensityStats, positionPixelRoi, type ChannelData } from '../lib/analysis.ts';
 import type { LoadedImage } from '../lib/image.ts';
-import { encodePseudocolorTiff, renderRoiPseudocolor, resolveDisplayRange, resolveRulerPixelSize, ROI_TIFF_DESCRIPTION } from '../lib/roi-export.ts';
+import { displayExclusionsForChannel, encodePseudocolorTiff, isDisplayExcluded, normalizeDisplayExclusion, renderRoiPseudocolor, resolveDisplayRange, resolveRulerPixelSize, ROI_TIFF_DESCRIPTION } from '../lib/roi-export.ts';
 
 const channel = (id: string, values: number[]): ChannelData => ({
   id,
@@ -77,6 +77,59 @@ test('different time points export the identical XY crop with their own pixel va
     assert.equal(page.getHeight(), 2);
     assert.deepEqual(Array.from(await page.readRasters({ interleave: true })), expected);
   }
+});
+
+test('manual display rectangles normalize reverse drags and reject empty or invalid regions', () => {
+  assert.deepEqual(normalizeDisplayExclusion(10, 10, { x: 3.8, y: 4.2, width: -3, height: -2 }, 'a'), { channelId: 'a', rect: { x: 0, y: 2, width: 4, height: 3 } });
+  assert.deepEqual(normalizeDisplayExclusion(10, 10, { x: -5, y: -5, width: 8, height: 7 }, null), { channelId: null, rect: { x: 0, y: 0, width: 3, height: 2 } });
+  for (const rect of [
+    { x: 11, y: 0, width: 2, height: 2 }, { x: NaN, y: 0, width: 2, height: 2 },
+    { x: 0.5, y: 0.5, width: 0, height: 2 }, { x: 0, y: 0, width: 2, height: 0 },
+  ]) assert.equal(normalizeDisplayExclusion(10, 10, rect, null), null);
+});
+
+test('manual masking changes only the selected display channel and not raw pixels or statistics', async () => {
+  const source = image(4, 4, [channel('a', new Array(16).fill(200)), channel('b', new Array(16).fill(100))]);
+  const before = source.channels.map(item => Array.from(item.data));
+  const stats = source.channels.map(item => intensityStats(item, 4, 4, null));
+  const region = normalizeDisplayExclusion(4, 4, { x: 1, y: 1, width: 2, height: 2 }, 'a')!;
+  const options = { image: source, channels: [{ id: 'a', color: 'red' as const, displayMin: 0, displayMax: 255 }, { id: 'b', color: 'green' as const, displayMin: 0, displayMax: 255 }] };
+  const untouched = renderRoiPseudocolor(options);
+  const masked = renderRoiPseudocolor({ ...options, displayExclusions: [region] });
+  for (let y = 0; y < 4; y++) for (let x = 0; x < 4; x++) {
+    const hidden = isDisplayExcluded(displayExclusionsForChannel([region], 'a'), x, y);
+    const offset = (y * 4 + x) * 3;
+    assert.deepEqual(Array.from(masked.rgb.slice(offset, offset + 3)), [hidden ? 0 : 200, 100, 0]);
+    assert.equal(hidden, x >= 1 && x < 3 && y >= 1 && y < 3);
+  }
+  assert.deepEqual(source.channels.map(item => Array.from(item.data)), before);
+  assert.deepEqual(source.channels.map(item => intensityStats(item, 4, 4, null)), stats);
+  assert.deepEqual(renderRoiPseudocolor({ ...options, displayExclusions: [] }).rgb, untouched.rgb, 'toggle off/undo restores the unchanged display');
+  const crop = renderRoiPseudocolor({ ...options, roi: { x: 1, y: 1, width: 2, height: 2 }, displayExclusions: [region] });
+  assert.deepEqual(Array.from(crop.rgb), new Array(4).fill([0, 100, 0]).flat());
+  const unaffectedChannel = renderRoiPseudocolor({ ...options, view: 'channel:b', displayExclusions: [region] });
+  assert.deepEqual(unaffectedChannel.rgb, renderRoiPseudocolor({ ...options, view: 'channel:b' }).rgb);
+  const tiff = await fromArrayBuffer(await encodePseudocolorTiff(crop));
+  const page = await tiff.getImage();
+  assert.deepEqual(Array.from(await page.readRasters({ interleave: true })), Array.from(crop.rgb));
+  const description = String(await page.getFileDirectory().loadValue('ImageDescription'));
+  assert.match(description, /Manual display exclusions applied/);
+  assert.match(description, /"channelId":"a"/);
+});
+
+test('overlapping all-channel masks hide only their union and leave the scale bar intact', () => {
+  const source = image(200, 200, [channel('a', new Array(40000).fill(200))]);
+  const region = normalizeDisplayExclusion(200, 200, { x: 0, y: 0, width: 200, height: 200 }, null)!;
+  const options = { image: source, channels: [{ id: 'a', color: 'blue' as const, displayMin: 0, displayMax: 255 }], displayExclusions: [region, region] };
+  const black = renderRoiPseudocolor(options);
+  assert.equal(black.rgb.some(value => value > 0), false);
+  assert.equal(black.hasVisibleSignal, false);
+  const withScale = renderRoiPseudocolor({ ...options, pixelSizeUm: 0.2, scaleBarUm: 20 });
+  assert.equal(withScale.scaleBar?.rendered, true);
+  assert.equal(withScale.scaleBar?.pixelLength, 100);
+  assert.equal(withScale.rgb.some(value => value > 0), true);
+  assert.equal(withScale.hasVisibleSignal, false, 'ruler is not fluorescence signal');
+  assert.throws(() => renderRoiPseudocolor({ ...options, view: 'mask' }), /展示遮罩不能用于共定位 Mask/);
 });
 
 test('single-channel view and black point affect pseudocolor pixels only', () => {

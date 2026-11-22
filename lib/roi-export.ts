@@ -26,6 +26,27 @@ export interface RoiExportMask {
   backgroundB?: number;
 }
 
+export interface DisplayExclusion {
+  /** null hides all channels; otherwise only this channel's display contribution. */
+  channelId: string | null;
+  rect: Rect;
+}
+
+export function normalizeDisplayExclusion(width: number, height: number, rect: Rect, channelId: string | null): DisplayExclusion | null {
+  if (![width, height, rect.x, rect.y, rect.width, rect.height].every(Number.isFinite) || width <= 0 || height <= 0 || rect.width === 0 || rect.height === 0) return null;
+  const bounds = boundsFor(width, height, rect);
+  if (!bounds.pixels) return null;
+  return { channelId, rect: { x: bounds.x0, y: bounds.y0, width: bounds.x1 - bounds.x0, height: bounds.y1 - bounds.y0 } };
+}
+
+export function displayExclusionsForChannel(regions: readonly DisplayExclusion[], channelId: string) {
+  return regions.filter(region => region.channelId === null || region.channelId === channelId);
+}
+
+export function isDisplayExcluded(regions: readonly DisplayExclusion[], x: number, y: number): boolean {
+  return regions.some(({ rect }) => x >= rect.x && x < rect.x + rect.width && y >= rect.y && y < rect.y + rect.height);
+}
+
 export interface RenderRoiOptions {
   image: LoadedImage;
   channels: RoiExportChannel[];
@@ -37,6 +58,8 @@ export interface RenderRoiOptions {
    */
   blackPointPercent?: number;
   mask?: RoiExportMask | null;
+  /** Manual black display masks, in original-image coordinates. Never applied to raw data or statistics. */
+  displayExclusions?: readonly DisplayExclusion[];
   /** A scale bar is drawn only when both values are finite and greater than zero. */
   pixelSizeUm?: number | null;
   scaleBarUm?: number | null;
@@ -60,6 +83,7 @@ export interface RenderedRoi {
   scaleBar: RenderedScaleBar | null;
   /** Image signal only, excluding any scale bar pixels. */
   hasVisibleSignal?: boolean;
+  displayExclusions?: readonly DisplayExclusion[];
 }
 
 export const ROI_TIFF_DESCRIPTION = 'FluoroScope ROI export; 8-bit RGB pseudocolor rendering; not raw quantitative fluorescence data.';
@@ -221,6 +245,8 @@ export function renderRoiPseudocolor(options: RenderRoiOptions): RenderedRoi {
     scaleBarUm = null,
   } = options;
   const blackPointPercent = clamp(Number.isFinite(options.blackPointPercent) ? Number(options.blackPointPercent) : 0, 0, 99.9);
+  const displayExclusions = options.displayExclusions ?? [];
+  if (view === 'mask' && displayExclusions.length) throw new Error('展示遮罩不能用于共定位 Mask。');
   const bounds = boundsFor(image.width, image.height, roi);
   const width = bounds.x1 - bounds.x0;
   const height = bounds.y1 - bounds.y0;
@@ -231,7 +257,7 @@ export function renderRoiPseudocolor(options: RenderRoiOptions): RenderedRoi {
     if (!channel) throw new Error(`找不到要导出的通道：${setting.id}`);
     if (channel.data.length < image.width * image.height) throw new Error(`通道 ${channel.label} 的像素数量不足。`);
     const range = resolveDisplayRange(channel, image.width, image.height, { ...setting, blackPointPercent });
-    return { channel, rgb: colorRgb(setting.color), ...range };
+    return { channel, rgb: colorRgb(setting.color), ...range, exclusions: displayExclusionsForChannel(displayExclusions, channel.id) };
   });
   if (!selected.length) throw new Error('当前视图对应的通道未被选择，无法导出。');
 
@@ -253,6 +279,7 @@ export function renderRoiPseudocolor(options: RenderRoiOptions): RenderedRoi {
       const target = (targetY * width + targetX) * 3;
       let red = 0, green = 0, blue = 0;
       for (const item of selected) {
+        if (isDisplayExcluded(item.exclusions, sourceX, sourceY)) continue;
         const value = clamp((Number(item.channel.data[source]) - item.low) / item.range, 0, 1);
         red = Math.min(1, red + value * item.rgb[0]);
         green = Math.min(1, green + value * item.rgb[1]);
@@ -280,6 +307,7 @@ export function renderRoiPseudocolor(options: RenderRoiOptions): RenderedRoi {
     blackPointPercent,
     scaleBar,
     hasVisibleSignal,
+    displayExclusions: displayExclusions.length ? displayExclusions : undefined,
   };
 }
 
@@ -295,7 +323,8 @@ export async function encodePseudocolorTiff(rendered: RenderedRoi): Promise<Arra
     PhotometricInterpretation: 2,
     SamplesPerPixel: 3,
     RowsPerStrip: rendered.height,
-    ImageDescription: ROI_TIFF_DESCRIPTION,
+    ImageDescription: ROI_TIFF_DESCRIPTION + (rendered.displayExclusions?.length
+      ? ` Manual display exclusions applied; not evidence of contamination removal. ${JSON.stringify({ sourceRoi: rendered.sourceRoi, displayExclusions: rendered.displayExclusions })}` : ''),
   };
   return writeArrayBuffer(rendered.rgb, metadata);
 }
